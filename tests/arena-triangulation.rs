@@ -96,7 +96,7 @@ fn arena_mesh() -> Mesh {
         vec2(1., 15.),
     ]);
 
-    triangulation.queue_subtract(&[
+    triangulation.add_obstacle(vec![
         vec2(15., 15.),
         vec2(19., 15.),
         vec2(19., 18.),
@@ -104,7 +104,7 @@ fn arena_mesh() -> Mesh {
         vec2(18., 19.),
         vec2(15., 19.),
     ]);
-    triangulation.queue_subtract(&[
+    triangulation.add_obstacle(vec![
         vec2(31., 15.),
         vec2(35., 15.),
         vec2(35., 18.),
@@ -112,7 +112,7 @@ fn arena_mesh() -> Mesh {
         vec2(34., 19.),
         vec2(31., 19.),
     ]);
-    triangulation.queue_subtract(&[
+    triangulation.add_obstacle(vec![
         vec2(15., 31.),
         vec2(19., 31.),
         vec2(19., 34.),
@@ -120,7 +120,7 @@ fn arena_mesh() -> Mesh {
         vec2(18., 35.),
         vec2(15., 35.),
     ]);
-    triangulation.queue_subtract(&[
+    triangulation.add_obstacle(vec![
         vec2(31., 31.),
         vec2(35., 31.),
         vec2(35., 34.),
@@ -128,7 +128,7 @@ fn arena_mesh() -> Mesh {
         vec2(34., 35.),
         vec2(31., 35.),
     ]);
-    triangulation.queue_subtract(&[
+    triangulation.add_obstacle(vec![
         vec2(23., 10.),
         vec2(23., 8.),
         vec2(24., 8.),
@@ -136,8 +136,7 @@ fn arena_mesh() -> Mesh {
         vec2(26., 7.),
         vec2(26., 10.),
     ]);
-    triangulation.update_mesh();
-    triangulation.as_navmesh().unwrap()
+    triangulation.as_navmesh()
 }
 
 #[test]

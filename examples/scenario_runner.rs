@@ -41,14 +41,16 @@ fn main() {
     use tracing_subscriber::layer::SubscriberExt;
 
     tracing::subscriber::set_global_default(
-        tracing_subscriber::registry().with(tracing_tracy::TracyLayer::new()),
+        tracing_subscriber::registry().with(tracing_tracy::TracyLayer::default()),
     )
     .expect("set up the subscriber");
 
     let mut args = std::env::args();
     args.next();
 
-    let mesh: Mesh = PolyanyaFile::from_file(&args.next().unwrap()).into();
+    let mesh: Mesh = PolyanyaFile::from_file(&args.next().unwrap())
+        .try_into()
+        .unwrap();
 
     for scenario in Scenarios::from_file(&args.next().unwrap()).0 {
         mesh.path(scenario.from, scenario.to).unwrap();

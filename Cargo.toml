@@ -1,6 +1,6 @@
 [package]
 name = "polyanya"
-version = "0.4.0"
+version = "0.7.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 keywords = ["pathfinding"]
@@ -12,33 +12,34 @@ documentation = "https://docs.rs/polyanya"
 categories = ["game-development"]
 
 [features]
-default = ["async", "wasm-compatible"]
+default = ["async"]
+#default = ["async", "wasm-compatible"]
 stats = []
 verbose = []
 async = []
 no-default-baking = []
-wasm-compatible = ["dep:geo-booleanop"]
-wasm-incompatible = ["dep:geo-clipper"]
+#wasm-compatible = ["dep:geo-booleanop"]
+#wasm-incompatible = ["dep:geo-clipper"]
 serde = ["glam/serde", "bvh2d/serde", "dep:serde"]
 
 [dependencies]
 tracing = { version = "0.1", optional = true }
 hashbrown = { version = "0.14" }
-glam = { version = "0.25", features = ["approx"] }
+glam = { version = "0.27", features = ["approx"] }
 smallvec = { version = "1.9", features = ["union", "const_generics"] }
-bvh2d = { git = "https://github.com/AnAverageGitUser/bvh2d.git", tag = "aagu/v0.2.0" }
-#bvh2d = { path = "../bvh2d" }
+bvh2d = { git = "https://github.com/AnAverageGitUser/bvh2d.git", tag = "aagu/v0.14.0" }
 serde = { version = "1.0", features = ["derive"], optional = true }
-spade = "2.2"
-geo = "0.27.0"
-geo-offset = { git = "https://github.com/mockersf/geo-offset", rev = "f4568a04188cbb55a7ae211e534e0a6144ae5291" }
-geo-booleanop = { git = "https://github.com/21re/rust-geo-booleanop", rev = "b9bbdbb34ebfa2aaeb99665842e64ede1696ed65", optional = true }
-geo-clipper = { version = "0.8.0", optional = true }
+spade = "2.9"
+geo = "0.28.0"
+#geo-offset = { git = "https://github.com/mockersf/geo-offset", rev = "f4568a04188cbb55a7ae211e534e0a6144ae5291" }
+#geo-booleanop = { git = "https://github.com/21re/rust-geo-booleanop", rev = "b9bbdbb34ebfa2aaeb99665842e64ede1696ed65", optional = true }
+#geo-clipper = { version = "0.8.0", optional = true }
 log = "0.4"
+thiserror = "1"
 
 [dev-dependencies]
 criterion = "0.5"
-tracing-tracy = "0.10"
+tracing-tracy = "0.11"
 tracing-subscriber = "0.3"
 tracing = "0.1"
 

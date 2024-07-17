@@ -4,7 +4,7 @@ use tracing_subscriber::layer::SubscriberExt;
 
 fn main() {
     tracing::subscriber::set_global_default(
-        tracing_subscriber::registry().with(tracing_tracy::TracyLayer::new()),
+        tracing_subscriber::registry().with(tracing_tracy::TracyLayer::default()),
     )
     .expect("set up the subscriber");
 
@@ -1826,8 +1826,7 @@ fn main() {
                 vec2(2.7777152, 2.6639614),
             ],
         ]);
-        triangulation.merge_overlapping_obstacles();
         triangulation.simplify(0.005);
-        triangulation.as_navmesh().unwrap();
+        triangulation.as_navmesh();
     }
 }

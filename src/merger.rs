@@ -277,14 +277,13 @@ mod test {
             Vec2::new(5., 5.),
             Vec2::new(-5., 5.),
         ]);
-        triangulation.queue_subtract(&[
+        triangulation.add_obstacle(vec![
             Vec2::new(-1., -1.),
             Vec2::new(-1., 1.),
             Vec2::new(1., 1.),
             Vec2::new(1., -1.),
         ]);
-        triangulation.update_mesh();
-        let mut mesh = triangulation.as_navmesh().unwrap();
+        let mut mesh = triangulation.as_navmesh();
         // println!("{:#?}", mesh);
         while mesh.merge_polygons() {
             // println!("{:#?}", mesh);
@@ -302,21 +301,20 @@ mod test {
             Vec2::new(5., 5.),
             Vec2::new(-5., 5.),
         ]);
-        triangulation.queue_subtract(&[
+        triangulation.add_obstacle(vec![
             Vec2::new(3.7, -3.3),
             Vec2::new(3.7, -3.7),
             Vec2::new(3.3, -3.7),
             Vec2::new(3.3, -3.3),
         ]);
-        triangulation.queue_subtract(&[
+        triangulation.add_obstacle(vec![
             Vec2::new(4.6, -1.3),
             Vec2::new(4.6, -1.7),
             Vec2::new(4.2, -1.7),
             Vec2::new(4.2, -1.3),
         ]);
-        triangulation.update_mesh();
         triangulation.simplify(0.001);
-        let mut mesh = triangulation.as_navmesh().unwrap();
+        let mut mesh = triangulation.as_navmesh();
 
         mesh.unbake();
         // println!("{:#?}", mesh);
