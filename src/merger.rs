@@ -166,7 +166,7 @@ impl UnionFind {
 
 #[cfg(test)]
 mod test {
-    use glam::Vec2;
+    use glam::{vec2, Vec2};
 
     use crate::{Mesh, Polygon, Triangulation, Vertex};
 
@@ -301,17 +301,19 @@ mod test {
             Vec2::new(5., 5.),
             Vec2::new(-5., 5.),
         ]);
-        triangulation.add_obstacle(vec![
-            Vec2::new(3.7, -3.3),
-            Vec2::new(3.7, -3.7),
-            Vec2::new(3.3, -3.7),
-            Vec2::new(3.3, -3.3),
-        ]);
-        triangulation.add_obstacle(vec![
-            Vec2::new(4.6, -1.3),
-            Vec2::new(4.6, -1.7),
-            Vec2::new(4.2, -1.7),
-            Vec2::new(4.2, -1.3),
+        triangulation.add_obstacles(vec![
+            vec![
+                vec2(3.7, -3.3),
+                vec2(3.7, -3.7),
+                vec2(3.3, -3.7),
+                vec2(3.3, -3.3),
+            ],
+            vec![
+                vec2(4.6, -1.3),
+                vec2(4.6, -1.7),
+                vec2(4.2, -1.7),
+                vec2(4.2, -1.3),
+            ],
         ]);
         triangulation.simplify(0.001);
         let mut mesh = triangulation.as_navmesh();

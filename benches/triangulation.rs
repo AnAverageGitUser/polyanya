@@ -185,26 +185,6 @@ fn triangulation_overlapping(c: &mut Criterion) {
     });
 }
 
-fn triangulation_radius(c: &mut Criterion) {
-    c.bench_function(&"triangulation arena radius".to_string(), |b| {
-        b.iter(|| {
-            // Equivalent to the arena mesh
-            let mut triangulation = Triangulation::from_outer_edges(&ARENA_OUTER_EDGE);
-
-            triangulation.add_obstacle(ARENA_OBSTACLES[0].to_vec());
-            triangulation.add_obstacle(ARENA_OBSTACLES[1].to_vec());
-            triangulation.add_obstacle(ARENA_OBSTACLES[2].to_vec());
-            triangulation.add_obstacle(ARENA_OBSTACLES[3].to_vec());
-            triangulation.add_obstacle(ARENA_OBSTACLES[4].to_vec());
-
-            triangulation.set_unit_radius(3.0);
-
-            let mesh: Mesh = triangulation.as_navmesh().unwrap();
-            black_box(mesh);
-        })
-    });
-}
-
 fn triangulation_square(c: &mut Criterion) {
     c.bench_function(&"triangulation square".to_string(), |b| {
         b.iter(|| {
@@ -214,25 +194,25 @@ fn triangulation_square(c: &mut Criterion) {
                 vec2(10.0, 10.0),
                 vec2(0.0, 10.0),
             ]);
-            triangulation.queue_subtract([
+            triangulation.add_obstacle(vec![
                 vec2(2.5, 2.5),
                 vec2(2.5, 5.0),
                 vec2(5.0, 5.0),
                 vec2(5.0, 2.5),
             ]);
-            triangulation.queue_subtract([
+            triangulation.add_obstacle(vec![
                 vec2(2.5, 5.01),
                 vec2(2.5, 7.5),
                 vec2(5.01, 7.5),
                 vec2(5.01, 5.01),
             ]);
-            triangulation.queue_subtract([
+            triangulation.add_obstacle(vec![
                 vec2(5.01, 2.5),
                 vec2(5.01, 5.0),
                 vec2(7.5, 5.0),
                 vec2(7.5, 2.5),
             ]);
-            triangulation.queue_subtract([
+            triangulation.add_obstacle(vec![
                 vec2(5.01, 5.01),
                 vec2(5.01, 7.5),
                 vec2(7.5, 7.5),
@@ -253,25 +233,25 @@ fn triangulation_square_overlapping(c: &mut Criterion) {
                 vec2(10.0, 10.0),
                 vec2(0.0, 10.0),
             ]);
-            triangulation.queue_subtract([
+            triangulation.add_obstacle(vec![
                 vec2(2.5, 2.5),
                 vec2(2.5, 6.0),
                 vec2(6.0, 6.0),
                 vec2(6.0, 2.5),
             ]);
-            triangulation.queue_subtract([
+            triangulation.add_obstacle(vec![
                 vec2(2.5, 4.0),
                 vec2(2.5, 7.5),
                 vec2(6.0, 7.5),
                 vec2(6.0, 4.0),
             ]);
-            triangulation.queue_subtract([
+            triangulation.add_obstacle(vec![
                 vec2(4.0, 2.5),
                 vec2(4.0, 6.0),
                 vec2(7.5, 6.0),
                 vec2(7.5, 2.5),
             ]);
-            triangulation.queue_subtract([
+            triangulation.add_obstacle(vec![
                 vec2(4.0, 4.0),
                 vec2(4.0, 7.5),
                 vec2(7.5, 7.5),
@@ -2111,18 +2091,6 @@ fn triangulation_many_overlapping(c: &mut Criterion) {
     });
 }
 
-fn triangulation_many_overlapping_radius(c: &mut Criterion) {
-    c.bench_function(&"triangulation many overlapping radius".to_string(), |b| {
-        b.iter(|| {
-            let mut triangulation = random_with_many_obstacles();
-            triangulation.merge_overlapping_obstacles();
-            triangulation.set_unit_radius(0.1);
-            let mesh: Mesh = triangulation.as_navmesh().unwrap();
-            black_box(mesh);
-        })
-    });
-}
-
 fn triangulation_many_overlapping_simplified(c: &mut Criterion) {
     c.bench_function(
         &"triangulation many overlapping (simplified)".to_string(),
@@ -2140,13 +2108,11 @@ fn triangulation_many_overlapping_simplified(c: &mut Criterion) {
 criterion_group!(
     benches,
     triangulation,
-    triangulation_radius,
     triangulation_bulk,
     triangulation_overlapping,
     triangulation_square,
     triangulation_square_overlapping,
     triangulation_many_overlapping,
-    triangulation_many_overlapping_radius,
     triangulation_many_overlapping_simplified,
 );
 criterion_main!(benches);
