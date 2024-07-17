@@ -14,7 +14,7 @@ fn main() {
     use tracing_subscriber::layer::SubscriberExt;
 
     tracing::subscriber::set_global_default(
-        tracing_subscriber::registry().with(tracing_tracy::TracyLayer::default()),
+        tracing_subscriber::registry().with(tracing_tracy::TracyLayer::new()),
     )
     .expect("set up the subscriber");
 

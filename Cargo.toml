@@ -1,6 +1,6 @@
 [package]
 name = "polyanya"
-version = "0.5.2"
+version = "0.4.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 keywords = ["pathfinding"]
@@ -24,20 +24,21 @@ serde = ["glam/serde", "bvh2d/serde", "dep:serde"]
 [dependencies]
 tracing = { version = "0.1", optional = true }
 hashbrown = { version = "0.14" }
-glam = { version = "0.25", features = ["approx"] }
+glam = { version = "0.24", features = ["approx"] }
 smallvec = { version = "1.9", features = ["union", "const_generics"] }
-bvh2d = { version = "0.4", git = "https://github.com/mockersf/bvh2d" }
+bvh2d = { git = "https://github.com/AnAverageGitUser/bvh2d.git", tag = "aagu/v0.1.0" }
+#bvh2d = { path = "../bvh2d" }
 serde = { version = "1.0", features = ["derive"], optional = true }
 spade = "2.2"
-log = "0.4"
-geo = "0.28.0"
-geo-offset = { git = "https://github.com/mockersf/geo-offset", branch = "support-f32" }
-geo-booleanop = { git = "https://github.com/21re/rust-geo-booleanop", optional = true }
+geo = "0.27.0"
+geo-offset = { git = "https://github.com/mockersf/geo-offset", rev = "f4568a04188cbb55a7ae211e534e0a6144ae5291" }
+geo-booleanop = { git = "https://github.com/21re/rust-geo-booleanop", rev = "b9bbdbb34ebfa2aaeb99665842e64ede1696ed65", optional = true }
 geo-clipper = { version = "0.8.0", optional = true }
+log = "0.4"
 
 [dev-dependencies]
 criterion = "0.5"
-tracing-tracy = "0.11"
+tracing-tracy = "0.10"
 tracing-subscriber = "0.3"
 tracing = "0.1"
 

@@ -47,7 +47,10 @@ mod primitives;
 #[cfg(feature = "async")]
 pub use async_helpers::FuturePath;
 pub use input::polyanya_file::PolyanyaFile;
-pub use input::triangulation::Triangulation;
+pub use input::triangulation::{
+    Coord as GeoCoord, LineString as GeoLineString, MultiPolygon as GeoMultiPolygon,
+    Polygon as GeoPolygon, PolygonMeshSetOperation, Triangulation,
+};
 pub use input::trimesh::Trimesh;
 pub use primitives::{Polygon, Vertex};
 
@@ -204,7 +207,10 @@ impl Mesh {
             })
             .collect::<Vec<_>>();
 
-        self.baked_polygons = Some(BVH2d::build(&bounded_polygons));
+        self.baked_polygons = Some(
+            BVH2d::build(&bounded_polygons)
+                .expect("there should be polygons at this point in time"),
+        );
     }
 
     /// Create a `Mesh` from a list of [`Vertex`] and [`Polygon`].

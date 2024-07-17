@@ -215,25 +215,25 @@ fn triangulation_square(c: &mut Criterion) {
                 vec2(10.0, 10.0),
                 vec2(0.0, 10.0),
             ]);
-            triangulation.add_obstacle(vec![
+            triangulation.queue_subtract([
                 vec2(2.5, 2.5),
                 vec2(2.5, 5.0),
                 vec2(5.0, 5.0),
                 vec2(5.0, 2.5),
             ]);
-            triangulation.add_obstacle(vec![
+            triangulation.queue_subtract([
                 vec2(2.5, 5.01),
                 vec2(2.5, 7.5),
                 vec2(5.01, 7.5),
                 vec2(5.01, 5.01),
             ]);
-            triangulation.add_obstacle(vec![
+            triangulation.queue_subtract([
                 vec2(5.01, 2.5),
                 vec2(5.01, 5.0),
                 vec2(7.5, 5.0),
                 vec2(7.5, 2.5),
             ]);
-            triangulation.add_obstacle(vec![
+            triangulation.queue_subtract([
                 vec2(5.01, 5.01),
                 vec2(5.01, 7.5),
                 vec2(7.5, 7.5),
@@ -254,25 +254,25 @@ fn triangulation_square_overlapping(c: &mut Criterion) {
                 vec2(10.0, 10.0),
                 vec2(0.0, 10.0),
             ]);
-            triangulation.add_obstacle(vec![
+            triangulation.queue_subtract([
                 vec2(2.5, 2.5),
                 vec2(2.5, 6.0),
                 vec2(6.0, 6.0),
                 vec2(6.0, 2.5),
             ]);
-            triangulation.add_obstacle(vec![
+            triangulation.queue_subtract([
                 vec2(2.5, 4.0),
                 vec2(2.5, 7.5),
                 vec2(6.0, 7.5),
                 vec2(6.0, 4.0),
             ]);
-            triangulation.add_obstacle(vec![
+            triangulation.queue_subtract([
                 vec2(4.0, 2.5),
                 vec2(4.0, 6.0),
                 vec2(7.5, 6.0),
                 vec2(7.5, 2.5),
             ]);
-            triangulation.add_obstacle(vec![
+            triangulation.queue_subtract([
                 vec2(4.0, 4.0),
                 vec2(4.0, 7.5),
                 vec2(7.5, 7.5),
