@@ -322,15 +322,7 @@ mod test {
             // println!("{:#?}", mesh);
         }
         mesh.bake();
-        // TODO: this is a bit of an unexpected difference between "wasm-incompatible" and "wasm-compatible", but lets see if it actually matters...
-        #[cfg(all(feature = "wasm-incompatible", not(feature = "wasm-compatible")))]
-        {
-            assert_eq!(mesh.polygons.len(), 7);
-        }
-        #[cfg(feature = "wasm-compatible")]
-        {
-            assert_eq!(mesh.polygons.len(), 6);
-        }
+        assert_eq!(mesh.polygons.len(), 6);
         dbg!(mesh.path(Vec2::new(-4.5, 4.0), Vec2::new(-4.0, -4.5)));
     }
 }

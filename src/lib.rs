@@ -114,7 +114,6 @@ impl Hash for Root {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         ((self.0.x * PRECISION) as i32).hash(state);
         ((self.0.y * PRECISION) as i32).hash(state);
-        state.finish();
     }
 }
 
@@ -429,7 +428,7 @@ impl Mesh {
 
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
     #[inline(always)]
-    fn approx_path_fix_end(&self, start_index: u32, _from: Vec2, _to: Vec2, intersections: &Vec<Vec2>) -> (u32, Vec2) {
+    fn approx_path_fix_end(&self, start_index: u32, _from: Vec2, _to: Vec2, intersections: &[Vec2]) -> (u32, Vec2) {
         let islands = self.islands.as_ref().expect("islands must exist");
         let start_island = islands.get(start_index as usize).expect("start point island must exist");
 

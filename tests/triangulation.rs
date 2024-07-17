@@ -417,9 +417,7 @@ fn is_in_mesh_with_border_and_middle_island() {
 
 /// This crashed because of lines crossing when trying to build the CDT.
 /// This data has a passable path mesh island in its middle.
-///
-/// This test is slow, either use cargo --release or use the feature-flag "wasm-incompatible" instead of
-/// "wasm-compatible".
+#[cfg(not(debug_assertions))] // This test is very slow, use cargo test --release.
 #[test]
 fn previous_crash_case_1() {
     let mut triangulation = Triangulation::from_outer_edges(&[
@@ -447,6 +445,7 @@ fn previous_crash_case_1() {
     triangulation.as_navmesh();
 }
 
+#[cfg(not(debug_assertions))] // This test is slow, use cargo test --release.
 #[test]
 fn previous_crash_case_2() {
     let mut triangulation = Triangulation::from_outer_edges(&[

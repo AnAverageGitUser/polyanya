@@ -13,13 +13,10 @@ categories = ["game-development"]
 
 [features]
 default = ["async"]
-#default = ["async", "wasm-compatible"]
 stats = []
 verbose = []
 async = []
 no-default-baking = []
-#wasm-compatible = ["dep:geo-booleanop"]
-#wasm-incompatible = ["dep:geo-clipper"]
 serde = ["glam/serde", "bvh2d/serde", "dep:serde"]
 
 [dependencies]
@@ -31,9 +28,6 @@ bvh2d = { git = "https://github.com/AnAverageGitUser/bvh2d.git", tag = "aagu/v0.
 serde = { version = "1.0", features = ["derive"], optional = true }
 spade = "2.9"
 geo = "0.28.0"
-#geo-offset = { git = "https://github.com/mockersf/geo-offset", rev = "f4568a04188cbb55a7ae211e534e0a6144ae5291" }
-#geo-booleanop = { git = "https://github.com/21re/rust-geo-booleanop", rev = "b9bbdbb34ebfa2aaeb99665842e64ede1696ed65", optional = true }
-#geo-clipper = { version = "0.8.0", optional = true }
 log = "0.4"
 thiserror = "1"
 
