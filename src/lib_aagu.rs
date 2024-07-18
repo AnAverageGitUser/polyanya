@@ -1,3 +1,4 @@
+use std::iter;
 use geo::{BoundingRect, Coord, Intersects, LinesIter};
 use glam::{Vec2, vec2};
 use log::{error, warn};
@@ -7,64 +8,128 @@ use crate::{Mesh, Path};
 #[cfg(feature = "tracing")]
 use tracing::instrument;
 
+const EPSILON: f32 = 0.001;
+
+/// The mode given to the navigation algorithm to determine which kind of behaviour we expect when the start or end
+/// point is not within the mesh.
+#[derive(Debug, Copy, Clone)]
+pub enum PointCorrectionMode {
+    /// If the point is not in the mesh, return no path.
+    ///
+    /// Choose this for the start point, if your agents are either never outside the navmesh or if it is acceptable
+    /// that agents that are outside your navmesh can not move again until they are somehow put onto the navmesh again.
+    ///
+    /// Choose this for the end point, if your agents must not start moving to the target if the target is outside of
+    /// the navmesh. The target point is the deemed unreachable.
+    NoCorrection,
+    /// This is a somewhat more complicated, more expensive, but higher quality calculation method than
+    /// [`PointCorrectionMode::ClosestMeshEdge`].
+    ///
+    /// If the point is not within the mesh, find a point that is approximately the closest to that point but within the
+    /// mesh and within the given distance.
+    /// If that point exists, use that point as the next (if used for start point) or previous (if used for end point)
+    /// waypoint of the given point, otherwise return no path.
+    /// If you want to allow arbitrary distances, parameterize with `f32::INFINITY`.
+    ///
+    /// Choose this for the start point, if the agent may sometimes be outside the navmesh and you want to make sure
+    /// that the agent moves the shortest distance possible to first be within the navmesh again,
+    /// before making themself on the way for the target.
+    ///
+    /// Choose this for the end point, if the agent should move to the closest point within the navmesh possible,
+    /// when the end point is outside the navmesh - but still within the given distance of the navmesh.
+    ClosestPointInMesh(f32),
+    /// This is a somewhat easier, cheaper, but lower quality calculation method than
+    /// [`PointCorrectionMode::ClosestPointInMesh`].
+    /// Refer to that item for some more info.
+    ///
+    /// If the point is not within the mesh, find the closest edge point of the mesh that is within the given distance.
+    /// If that point exists, use that point as the next (if used for start point) or previous (if used for end point)
+    /// waypoint of the given point, otherwise return no path.
+    /// If you want to allow arbitrary distances, parameterize with `f32::INFINITY`.
+    ClosestMeshEdge(f32),
+}
+/// The mode given to the navigation algorithm to determine which kind of behaviour we expect when the
+/// (possibly corrected) start point or (possibly corrected) end point are on different islands.
+#[derive(Debug, Copy, Clone)]
+pub enum IslandTraversalMode {
+    /// If the (possibly corrected) start point and the (possibly corrected) end point are on different islands,
+    /// return no path.
+    NoTraversal,
+    /// If the (possibly corrected) start point and the (possibly corrected) end point are on different islands,
+    /// change the (possibly corrected) end point to the closest point that is on the same island as the
+    /// (possibly corrected) start point and the original uncorrected end point,
+    /// but only if that point is not farther away than the given distance.
+    ClosestOnStartIsland(f32),
+}
+/// The settings for the navigation algorithm.
+/// Certain situation can be configured to be handled differently.
+#[derive(Debug, Copy, Clone)]
+pub struct NavigationRequestSettings {
+    /// The [`PointCorrectionMode`] of this navigation request's start point.
+    pub start: PointCorrectionMode,
+    /// The [`IslandTraversalMode`] of this navigation request.
+    pub islands: IslandTraversalMode,
+    /// The [`PointCorrectionMode`] of this navigation request's end point.
+    pub end: PointCorrectionMode,
+    /// A placeholder, *not used right now*.
+    /// The radius that the agent has.
+    /// Whenever a path is created, it is checked if this radius fits in both directions on each polygon line it
+    /// intersects.
+    /// This might shift the waypoint of the agent on each polygon edge, to "make room" for the agent.
+    /// This should work as long as every polygon's edge is adjacent to the outside or an obstacle.
+    pub _agent_radius: f32,
+    /// A placeholder, *not used right now*.
+    /// The maximum allowed length that the agent is allowed to travel.
+    /// This can be used as an optimization to terminate some paths early on if they are to far away.
+    pub _max_length: f32,
+}
+
+/// A status indication if a start/end point was modified and if yes to what.
+#[derive(Debug, Copy, Clone)]
+pub enum PointStatus {
+    /// The point was not modified.
+    Original,
+    /// The point was modified according to the given setting.
+    Modified {
+        original: Vec2,
+        modified: Vec2,
+    },
+}
 /// TODO
 #[derive(Debug, Copy, Clone)]
 pub enum PathApproxResultEnum {
-    /// The start- and end-point are within the same mesh islands and a path was found.
-    ValidPath,
-    /// The start- and end-points are within different mesh islands.
+    /// The (possibly corrected) start point and (possibly corrected) end point are within the same mesh islands and
+    /// a path was found.
+    ValidPath,/// The start- and end-points are within different mesh islands.
     /// There cannot exist a valid path between the two points.
-    /// A path with a modified end-point was given that is closest to the original end-point that is on within the same
-    /// mesh island of the start point.
-    NoPath,
-    /// The end-point was inside the mesh, but the start-point was outside the mesh.
-    /// The end-point might be modified that the agent can get to the closest point to the original end-point within the
-    /// same mesh island that the point of the intersection of the mesh and the line between start- and end-point has.
     ///
-    /// This might be a bug, but if the mesh gets smaller and agents are not moved, this situation may occur.
-    StartOutside,
-    /// The start- and end-point were outside the mesh.
     /// A direct path that ignores the mesh-bounds is given.
-    /// This is a bug, but might happen at some point during the game and then the agents should not get stuck.
-    BothOutside,
-    /// The start-point was inside the mesh, but the end-point was outside the mesh.
-    /// The end-point was modified such that the agent can get to the closest point to the original end-point within the
-    /// same mesh island that the start-point is in.
-    ///
-    /// This can happen regularly, e.g., if the user clicks outside the mesh.
-    /// The intention of the user is usually to get the agent to a point close to the target point and not for the agent
-    /// to not move.
-    EndOutside,
+    NoValidPath,
+    /// The (possibly corrected) start point and (possibly corrected) end point are on different mesh islands and
+    /// the navigation request did not allow creating a path.
+    DifferentIslandsNoPath,
+    /// The (possibly corrected) start point and (possibly corrected) end point are on different mesh islands and
+    /// the navigation request did allow creating a path that lets the agent move closer to the target, but only within
+    /// the starting point's island.
+    DifferentIslandsFirstIsland,
     /// The start- and end-point are within the same mesh islands, but a path could not be found and deadlock prevention
     /// kicked in.
-    /// A direct path that ignores the mesh-bounds is given.
     /// This is a bug, but does not seem to happen frequently enough to be important.
+    ///
+    /// A direct path that ignores the mesh-bounds is given.
     InfinitePrevention,
-    /// The pathfinding algorithm has a bug, instead of crashing the application, this result was returned.
+    /// The navigation algorithm has a bug, instead of crashing the application, this result was returned.
+    ///
     /// A direct path that ignores the mesh-bounds is given.
     BugCrashPrevention,
 }
 impl PathApproxResultEnum {
-    /// True if the target might have been modified.
-    pub fn is_end_modified(&self) -> bool {
-        match self {
-            PathApproxResultEnum::ValidPath => {false}
-            PathApproxResultEnum::NoPath => {true}
-            PathApproxResultEnum::StartOutside => {true}
-            PathApproxResultEnum::BothOutside => {false}
-            PathApproxResultEnum::EndOutside => {true}
-            PathApproxResultEnum::InfinitePrevention => {false}
-            PathApproxResultEnum::BugCrashPrevention => {false}
-        }
-    }
     /// True if the situation is expected to occur.
     pub fn is_valid_situation(&self) -> bool {
         match self {
             PathApproxResultEnum::ValidPath => {true}
-            PathApproxResultEnum::NoPath => {true}
-            PathApproxResultEnum::StartOutside => {false}
-            PathApproxResultEnum::BothOutside => {false}
-            PathApproxResultEnum::EndOutside => {true}
+            PathApproxResultEnum::DifferentIslandsNoPath => {true}
+            PathApproxResultEnum::DifferentIslandsFirstIsland => {true}
             PathApproxResultEnum::InfinitePrevention => {false}
             PathApproxResultEnum::BugCrashPrevention => {false}
         }
@@ -76,7 +141,11 @@ pub struct PathApproxResult {
     /// TODO
     pub path: Path,
     /// TODO
+    pub start: PointStatus,
+    /// TODO
     pub status: PathApproxResultEnum,
+    /// TODO
+    pub end: PointStatus,
 }
 impl PathApproxResult {
     /// Gets the last element of the path: the destination.
@@ -203,15 +272,49 @@ impl<'m> MeshAagu<'m> {
     ///   - the target point will be replaced by the point that is closest to the target point,
     ///     that is still reachable from the starting point.
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
-    pub fn approx_path(&self, mut from: Vec2, mut to: Vec2) -> PathApproxResult {
+    pub fn approx_path(&self, settings: NavigationRequestSettings, mut from: Vec2, mut to: Vec2) -> PathApproxResult {
         #[cfg(feature = "stats")]
         let start = std::time::Instant::now();
 
+        let from_orig = from;
+        let to_orig = to;
         let mut starting_polygon_index = self.get_point_location_ignore_delta(from);
         let mut ending_polygon_index = self.get_point_location_ignore_delta(to);
         let mut remove_first_waypoint = true;
+        let mut start_status = PointStatus::Original;
+        let mut end_status = PointStatus::Original;
+
+        if starting_polygon_index == u32::MAX {
+            (from, starting_polygon_index) = self.fix_start_point(&settings, from, to, starting_polygon_index)?;
+        }
 
         let status = if starting_polygon_index == u32::MAX {
+            // let Some(possibly_corrected_start_point) = match settings.start {
+            //     PointCorrectionMode::NoCorrection => Some(from),
+            //     PointCorrectionMode::ClosestPointInMesh(max_dist) => self.closest_exterior_point(from, max_dist),
+            //     PointCorrectionMode::ClosestMeshEdge(max_dist) => self.closest_exterior_point_line_edge(from, max_dist),
+            // }
+            // else {
+            //     return PathApproxResult {
+            //         path: new_direct_path(from, to),
+            //         start: PointStatus::Original,
+            //         status: PathApproxResultEnum::NoValidPath,
+            //         end: PointStatus::Original,
+            //     }
+            // };
+            // from = possibly_corrected_start_point;
+            // starting_polygon_index = self.get_point_location_ignore_delta(from);
+            // if starting_polygon_index == u32::MAX {
+            //     // this must then be because of floating point inaccuracies...
+            //     // TODO: guess around the given point, for now just fail
+            //     return PathApproxResult {
+            //         path: new_direct_path(from, to),
+            //         start: PointStatus::Original,
+            //         status: PathApproxResultEnum::BugCrashPrevention,
+            //         end: PointStatus::Original,
+            //     }
+            // }
+
             if ending_polygon_index == u32::MAX {
                 return PathApproxResult {
                     path: new_direct_path(from, to),
@@ -326,6 +429,49 @@ impl<'m> MeshAagu<'m> {
         }
     }
 
+    fn fix_start_point(&self, settings: &NavigationRequestSettings, from: Vec2, to: Vec2, starting_polygon_index: u32)
+        -> Result<(Vec2, u32), PathApproxResult>
+    {
+        if starting_polygon_index == u32::MAX {
+            let Some(possibly_corrected_start_point) = match settings.start {
+                PointCorrectionMode::NoCorrection => {
+                    return Err(PathApproxResult {
+                        path: new_direct_path(from, to),
+                        start: PointStatus::Original,
+                        status: PathApproxResultEnum::NoValidPath,
+                        end: PointStatus::Original,
+                    })
+                },
+                PointCorrectionMode::ClosestPointInMesh(max_dist) => self.closest_exterior_point(from, max_dist),
+                PointCorrectionMode::ClosestMeshEdge(max_dist) => self.closest_exterior_point_line_edge(from, max_dist),
+            }
+            else {
+                return Err(PathApproxResult {
+                    path: new_direct_path(from, to),
+                    start: PointStatus::Original,
+                    status: PathApproxResultEnum::NoValidPath,
+                    end: PointStatus::Original,
+                })
+            };
+
+            let starting_polygon_index = self.get_point_location_ignore_delta(possibly_corrected_start_point);
+            if starting_polygon_index == u32::MAX {
+                // this must then be because of floating point inaccuracies...
+                // TODO: guess around the given point, for now just fail
+                return Err(PathApproxResult {
+                    path: new_direct_path(from, to),
+                    start: PointStatus::Original,
+                    status: PathApproxResultEnum::BugCrashPrevention,
+                    end: PointStatus::Original,
+                })
+            }
+            Ok((possibly_corrected_start_point, starting_polygon_index))
+        }
+        else {
+            Ok((from, starting_polygon_index))
+        }
+    }
+
     /// Returns a vector with all polygon-edge intersections sorted by their distance to the given `from` point.
     #[inline(always)]
     fn all_line_intersections(&self, from: Vec2, to: Vec2) -> Vec<Vec2> {
@@ -397,7 +543,60 @@ impl<'m> MeshAagu<'m> {
         intersections.into_iter().map(|(pos, _dist_squared)| pos).collect()
     }
 
+    /// Returns the closest point in the mesh to the given point that is outside the mesh.
+    #[inline(always)]
+    fn closest_exterior_point(&self, point_outside_mesh: Vec2, max_allowed_dist: f32) -> Option<Vec2> {
+        let max_allowed_dist_sq = max_allowed_dist * max_allowed_dist;
+        let mut closest = None;
+        let mut distance_squared = max_allowed_dist_sq;
+        for poly in &self.mesh.polygons {
+            let mut iter_1 = poly.vertices.iter();
+            let mut iter_2 = poly.vertices.iter();
+            iter_2.next();
+            for (p1i, p2i) in iter_1.zip(iter_2.chain(iter::once(poly.vertices.first().expect("polygon must not be empty"))))
+                .map(|(a, b)| (*a as usize, *b as usize))
+            {
+                let p1 = self.mesh.vertices[p1i].coords;
+                let p2 = self.mesh.vertices[p2i].coords;
+                let on_line_segment = calc_projected_and_clipped_pos_on_line_segment(p1, p2, point_outside_mesh, EPSILON);
+                let dist_sq = on_line_segment.distance_squared(point_outside_mesh);
+                if dist_sq <= distance_squared { // use "<=" to overwrite possible "None" element
+                    distance_squared = dist_sq;
+                    closest = Some(on_line_segment);
+                }
+            }
+        }
+        closest
+    }
+
+    /// Returns the closest point in the mesh to the given point that is outside the mesh.
+    #[inline(always)]
+    fn closest_exterior_point_line_edge(&self, point_outside_mesh: Vec2, max_dist: f32) -> Option<Vec2> {
+        let max_dist_sq = max_dist * max_dist;
+        let mut closest = None;
+        let mut distance_squared = max_dist_sq;
+        for poly in &self.mesh.polygons {
+            for vertex_idx in poly.vertices.iter() {
+                let p1 = self.mesh.vertices[*vertex_idx].coords;
+                let p1_dist_sq = p1.distance_squared(point_outside_mesh);
+                if p1_dist_sq <= distance_squared { // use "<=" to overwrite possible "None" element
+                    distance_squared = p1_dist_sq;
+                    closest = Some(p1);
+                }
+
+                let p2 = self.mesh.vertices[*vertex_idx].coords;
+                let p2_dist_sq = p2.distance_squared(point_outside_mesh);
+                if p2_dist_sq <= distance_squared { // use "<=" to overwrite possible "None" element
+                    distance_squared = p2_dist_sq;
+                    closest = Some(p2);
+                }
+            }
+        }
+        closest
+    }
+
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[inline(always)]
     fn get_point_location_ignore_delta(&self, point: Vec2) -> u32 {
         if self.mesh.baked_polygons.is_none() {
             self.mesh.get_point_location_unit(point)
@@ -406,4 +605,66 @@ impl<'m> MeshAagu<'m> {
             self.mesh.get_point_location_unit_baked(point)
         }
     }
+}
+
+
+
+
+#[derive(Debug, Copy, Clone)]
+enum LineSegmentProjection {
+    OutsideSmallerP1,
+    Inside,
+    OutsideBiggerP2,
+}
+/// If the projected line segment is on either `p1` or `p2` the point is seen as [`LineSegmentProjection::Inside`].
+#[inline(always)]
+fn _calc_projected_pos_on_line_segment(p1: Vec2, p2: Vec2, to_be_projected_pt: Vec2) -> LineSegmentProjection {
+    let p1_to_p2 = vec2(p2.x - p1.x, p2.y - p1.y);
+    let line_segment_dot = p1_to_p2.dot(p1_to_p2);
+
+    let p1_to_pr = vec2(to_be_projected_pt.x - p1.x, to_be_projected_pt.y - p1.y);
+    let projection_dot = p1_to_p2.dot(p1_to_pr);
+
+    if projection_dot < 0.0 {
+        LineSegmentProjection::OutsideSmallerP1
+    }
+    else if projection_dot > line_segment_dot {
+        LineSegmentProjection::OutsideBiggerP2
+    }
+    else {
+        LineSegmentProjection::Inside
+    }
+}
+/// Calculates the projection of the given point onto the given line.
+/// If the given point would be outside the given line segment, it is clipped to p1 or p2 - depending on which point is
+/// closer.
+#[inline(always)]
+fn calc_projected_and_clipped_pos_on_line_segment(p1: Vec2, p2: Vec2, to_be_projected_pt: Vec2, epsilon: f32) -> Vec2 {
+    debug_assert!(epsilon > 0.0);
+
+    let p1_to_p2 = vec2(p2.x - p1.x, p2.y - p1.y);
+    let line_segment_dot = p1_to_p2.dot(p1_to_p2);
+
+    let p1_to_pr = vec2(to_be_projected_pt.x - p1.x, to_be_projected_pt.y - p1.y);
+    let projection_dot = p1_to_p2.dot(p1_to_pr);
+
+    if projection_dot <= 0.0 + epsilon {
+        p1
+    }
+    else if projection_dot >= line_segment_dot - epsilon {
+        p2
+    }
+    else {
+        let len_squared = p1_to_p2.x * p1_to_p2.x + p1_to_p2.y * p1_to_p2.y;
+        p1 + (projection_dot * p1_to_p2) / len_squared
+    }
+}
+/// Calculates the projection of the given point onto the given line.
+#[inline(always)]
+fn _project_point_onto_line(p1: Vec2, p2: Vec2, to_be_projected_pt: Vec2) -> Vec2 {
+    let p1_to_p2 = vec2(p2.x - p1.x, p2.y - p1.y);
+    let p1_to_pr = vec2(to_be_projected_pt.x - p1.x, to_be_projected_pt.y - p1.y);
+    let projection_dot = p1_to_p2.dot(p1_to_pr);
+    let len_squared = p1_to_p2.x * p1_to_p2.x + p1_to_p2.y * p1_to_p2.y;
+    p1 + (projection_dot * p1_to_p2) / len_squared
 }
