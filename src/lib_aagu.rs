@@ -138,16 +138,22 @@ impl PathApproxResultEnum {
     }
 }
 /// TODO
-#[derive(Debug)]
-pub struct PathApproxResult {
-    /// TODO
-    pub path: Path,
+#[derive(Debug, Copy, Clone)]
+pub struct PathApproxResultStatus {
     /// TODO
     pub start: PointStatus,
     /// TODO
     pub status: PathApproxResultEnum,
     /// TODO
     pub end: PointStatus,
+}
+/// TODO
+#[derive(Debug)]
+pub struct PathApproxResult {
+    /// TODO
+    pub path: Path,
+    /// TODO
+    pub status: PathApproxResultStatus,
 }
 impl PathApproxResult {
     /// Gets the last element of the path: the destination.
@@ -185,49 +191,6 @@ pub struct MeshAagu<'m> {
     pub(crate) mesh: &'m Mesh,
 }
 impl<'m> MeshAagu<'m> {
-    /// Gets the first intersection with the mesh and uses it.
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
-    #[inline(always)]
-    fn approx_path_fix_start(&self, _end_index: u32, _from: Vec2, _to: Vec2, intersections: &[Vec2]) -> (u32, Vec2) {
-        if let Some(pos) = intersections.iter().next() {
-            let starting_polygon_index = self.get_point_location_ignore_delta(*pos);
-            if starting_polygon_index == u32::MAX {
-                // if this triggers, this is probably because of floating point inaccuracies
-                unreachable!("the start is not within mesh but the end should be, therefore the line segment SHOULD HAVE gotten at least one intermediate result that is WITHIN the mesh");
-            }
-            (starting_polygon_index, *pos)
-        }
-        else {
-            // if this triggers, this is probably a logical error
-            unreachable!("the start is not within mesh but the end should be, therefore the line segment SHOULD HAVE gotten at least one intermediate result");
-        }
-    }
-
-    #[cfg_attr(feature = "tracing", instrument(skip_all))]
-    #[inline(always)]
-    fn approx_path_fix_end(&self, start_index: u32, _from: Vec2, _to: Vec2, intersections: &[Vec2]) -> (u32, Vec2) {
-        let islands = self.mesh.islands.as_ref().expect("islands must exist");
-        let start_island = islands.get(start_index as usize).expect("start point island must exist");
-
-        for pos in intersections.iter().rev() {
-            let poly_idx = self.get_point_location_ignore_delta(*pos);
-            if poly_idx == u32::MAX {
-                // if this triggers, this is probably because of floating point inaccuracies
-                unreachable!("either the start or the end must be within the mesh, therefore the line segment SHOULD HAVE gotten at least one intermediate result");
-            }
-
-            // if this triggers, this is probably because of floating point inaccuracies
-            let end_island = islands.get(poly_idx as usize).expect("end point island must exist");
-            if start_island != end_island {
-                continue;
-            }
-
-            return (poly_idx, *pos)
-        }
-        // if this triggers, this is probably a logical error
-        unreachable!("either the start or the end must be within the mesh");
-    }
-
     /// Compute a path between two points.
     /// This method is blocking.
     /// - If the starting point and the end point are within the mesh:
@@ -301,9 +264,11 @@ impl<'m> MeshAagu<'m> {
             }
             return PathApproxResult {
                 path: new_possibly_corrected_path(from, to, from_orig),
-                start: start_status,
-                status: PathApproxResultEnum::ValidPath,
-                end: end_status,
+                status: PathApproxResultStatus {
+                    start: start_status,
+                    status: PathApproxResultEnum::ValidPath,
+                    end: end_status,
+                }
             }
         }
 
@@ -321,18 +286,22 @@ impl<'m> MeshAagu<'m> {
                 InstanceStep::Found(path) => {
                     return PathApproxResult {
                         path,
-                        start: start_status,
-                        status: PathApproxResultEnum::ValidPath,
-                        end: end_status,
+                        status: PathApproxResultStatus {
+                            start: start_status,
+                            status: PathApproxResultEnum::ValidPath,
+                            end: end_status,
+                        }
                     };
                 },
                 InstanceStep::NotFound => {
                     error!("Search from {from_orig} to {to_orig} failed. Please check if the mesh is valid as this should not happen as we've made sure that the two point are within the same mesh island");
                     return PathApproxResult {
                         path: new_direct_path(from_orig, to_orig),
-                        start: PointStatus::Original,
-                        status: PathApproxResultEnum::NoValidPath,
-                        end: PointStatus::Original,
+                        status: PathApproxResultStatus {
+                            start: PointStatus::Original,
+                            status: PathApproxResultEnum::NoValidPath,
+                            end: PointStatus::Original,
+                        }
                     }
                 }
                 InstanceStep::Continue => (),
@@ -342,9 +311,11 @@ impl<'m> MeshAagu<'m> {
         error!("Search from {from_orig} to {to_orig} failed. Please check if the mesh is valid as this should not happen. Infinite prevention triggered.");
         PathApproxResult {
             path: new_direct_path(from_orig, to_orig),
-            start: PointStatus::Original,
-            status: PathApproxResultEnum::InfinitePrevention,
-            end: PointStatus::Original,
+            status: PathApproxResultStatus {
+                start: PointStatus::Original,
+                status: PathApproxResultEnum::InfinitePrevention,
+                end: PointStatus::Original,
+            }
         }
     }
 
@@ -366,9 +337,11 @@ impl<'m> MeshAagu<'m> {
             PointCorrectionMode::NoCorrection => {
                 return Err(PathApproxResult {
                     path: fallback(),
-                    start: PointStatus::Original,
-                    status: PathApproxResultEnum::NoValidPath,
-                    end: PointStatus::Original,
+                    status: PathApproxResultStatus {
+                        start: PointStatus::Original,
+                        status: PathApproxResultEnum::NoValidPath,
+                        end: PointStatus::Original,
+                    }
                 })
             },
             PointCorrectionMode::ClosestPointInMesh(max_dist) => self.closest_exterior_point(outside_mesh_point, *max_dist, polygon_filter),
@@ -378,9 +351,11 @@ impl<'m> MeshAagu<'m> {
         let Some((possibly_corrected_start_point, new_polygon_index, max_dist_sq)) = corrected_opt else {
             return Err(PathApproxResult {
                 path: fallback(),
-                start: PointStatus::Original,
-                status: PathApproxResultEnum::NoValidPath,
-                end: PointStatus::Original,
+                status: PathApproxResultStatus {
+                    start: PointStatus::Original,
+                    status: PathApproxResultEnum::NoValidPath,
+                    end: PointStatus::Original,
+                }
             })
         };
 
@@ -393,9 +368,11 @@ impl<'m> MeshAagu<'m> {
             // if even the correction for the correction failed, we give up - this hopefully almost never happens
             Err(PathApproxResult {
                 path: fallback(),
-                start: PointStatus::Original,
-                status: PathApproxResultEnum::BugCrashPrevention,
-                end: PointStatus::Original,
+                status: PathApproxResultStatus {
+                    start: PointStatus::Original,
+                    status: PathApproxResultEnum::BugCrashPrevention,
+                    end: PointStatus::Original,
+                }
             })
         }
     }
