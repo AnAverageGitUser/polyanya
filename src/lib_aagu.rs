@@ -1,5 +1,4 @@
 use std::iter;
-use geo::{BoundingRect, Coord, Intersects, LinesIter};
 use glam::{Vec2, vec2};
 use log::{error, warn};
 use crate::instance::{InstanceStep, SearchInstance};
@@ -91,7 +90,9 @@ pub enum PointStatus {
     Original,
     /// The point was modified according to the given setting.
     Modified {
+        /// The original point that was not within the mesh.
         original: Vec2,
+        /// The modified point that is within the mesh.
         modified: Vec2,
     },
 }
@@ -156,14 +157,14 @@ impl PathApproxResult {
 }
 
 /// Creates a new object with the target as single waypoint.
-pub fn new_direct_path(from: Vec2, to: Vec2) -> Path {
+fn new_direct_path(from: Vec2, to: Vec2) -> Path {
     Path {
         length: from.distance(to),
         path: vec![to]
     }
 }
 
-pub fn new_possibly_corrected_path(from: Vec2, to: Vec2, from_orig: Vec2) -> Path {
+fn new_possibly_corrected_path(from: Vec2, to: Vec2, from_orig: Vec2) -> Path {
     if from != from_orig {
         Path {
             length: from_orig.distance(from) + from.distance(to),
@@ -177,57 +178,6 @@ pub fn new_possibly_corrected_path(from: Vec2, to: Vec2, from_orig: Vec2) -> Pat
         }
     }
 }
-
-#[inline(always)]
-fn line_intersection_no_parallel(x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32, x4: f32, y4: f32) -> Option<Vec2> {
-    let x2x1 = x2 - x1;
-    let x4x3 = x4 - x3;
-
-    // https://de.wikipedia.org/wiki/Koordinatenform
-    let a1 = y1 - y2;
-    let b1 = x2x1;
-    // let c1 = x2 * y1 - x1 * y2;
-
-    let a2 = y3 - y4;
-    let b2 = x4x3;
-    // let c2 = x4 * y3 - x3 * y4;
-
-    let is_parallel = a1 * b2 - a2 * b1 == 0.0;
-    if is_parallel {
-        return None; // TODO: for now ignored, should be calculated properly
-    }
-
-    // https://en.wikipedia.org/wiki/Intersection_(geometry)
-    let y4y3 = y4 - y3;
-    let y2y1 = y2 - y1;
-
-    let x3x1 = x3 - x1;
-    let y3y1 = y3 - y1;
-
-    let f1 = x3x1 / x2x1;
-    let f2 = x4x3 / x2x1;
-
-    let g2 = y2y1 / y4y3;
-    let g1 = y3y1 / y4y3;
-
-    let t = (g2 * f1 - g1) / -(g2 * f2);
-    let s = f1 + t * f2;
-
-    if (0.0..=1.0).contains(&s) && (0.0..=1.0).contains(&t) {
-        return None; // the intersection is not on the two line segments
-    }
-
-    let top_mul_left = x3 * y4 - y3 * x4;
-    let top_mul_right = x1 * y2 - y1 * x2;
-
-    let bottom_term = x2x1 * y4y3 - y2y1 * x4x3;
-    let intersection = vec2(
-        (x2x1 * top_mul_left - x4x3 * top_mul_right) / bottom_term,
-        (y2y1 * top_mul_left - y4y3 * top_mul_right) / bottom_term,
-    );
-    Some(intersection)
-}
-
 
 /// A navigation mesh
 #[derive(Debug, Clone)]
@@ -506,77 +456,6 @@ impl<'m> MeshAagu<'m> {
         Some(concave_poly_center)
     }
 
-    /// Returns a vector with all polygon-edge intersections sorted by their distance to the given `from` point.
-    #[inline(always)]
-    fn all_line_intersections(&self, from: Vec2, to: Vec2) -> Vec<Vec2> {
-        let line = geo::LineString::new(vec![Coord { x: from.x, y: from.y }, Coord { x: to.x, y: to.y }]);
-        let line_bb = line.bounding_rect().unwrap();
-        let mut intersections = Vec::new();
-
-        // TODO: terribly inefficient, at least cache the polygons as line strips or sth.
-        for poly in &self.mesh.polygons {
-            let poly_strip = poly.vertices.iter().map(|v| {
-                let vt = &self.mesh.vertices[*v as usize];
-                Coord { x: vt.coords.x, y: vt.coords.y }
-            }).collect::<Vec<_>>();
-            let mut strip = geo::LineString::new(poly_strip);
-            strip.close();
-            let poly = geo::Polygon::new(strip, vec![]);
-
-            if line_bb.intersects(&poly.bounding_rect().unwrap()) {
-                for line_poly in poly.exterior().lines_iter() {
-                    if line.intersects(&line_poly) {
-                        let intersection_opt = line_intersection_no_parallel( // TODO: since one line strip is fixed some intermediary calculations could be cached in an object
-                                                                              from.x, from.y,
-                                                                              to.x, to.y,
-                                                                              line_poly.start.x, line_poly.start.y,
-                                                                              line_poly.end.x, line_poly.end.y,
-                        );
-                        if let Some(mut intersection) = intersection_opt {
-                            // due to floating point rounding inaccuracies,
-                            // this intersection point is not guaranteed to be within the polygon
-                            let is_in_mesh = self.get_point_location_ignore_delta(intersection) != u32::MAX;
-                            if !is_in_mesh {
-                                // try normal to get into the polygon
-                                let p1_turned_90_deg = vec2(line_poly.start.y, -line_poly.start.x);
-                                let p2_turned_90_deg = vec2(line_poly.end.y, -line_poly.end.x);
-                                let normal = (p1_turned_90_deg - p2_turned_90_deg).normalize_or_zero();
-                                let normal_mu = normal * 0.01;
-
-                                let test_p = intersection + normal_mu;
-                                let is_in_mesh = self.get_point_location_ignore_delta(test_p) != u32::MAX;
-                                if is_in_mesh {
-                                    // info!("had to fix an intersection, {:?} to {:?}", intersection, test_p);
-                                    intersection = test_p;
-                                }
-                                else {
-                                    let test_p = intersection - normal_mu;
-                                    let is_in_mesh = self.get_point_location_ignore_delta(test_p) != u32::MAX;
-                                    if is_in_mesh {
-                                        // info!("had to fix an intersection, {:?} to {:?}", intersection, test_p);
-                                        intersection = test_p;
-                                    }
-                                    else {
-                                        error!("could not find an intersection point within the tested polygon, even though an intersection point was found! {:?}; {:?}", intersection, line_poly);
-                                        continue;
-                                    }
-                                }
-                            }
-
-                            let dist_sq = (intersection - from).length_squared();
-                            intersections.push((intersection, dist_sq))
-                        }
-                        else {
-                            warn!("geo crate determined that lines line segments intersect, however the calculation did not retrieve any intersection points. probably a bug (parallel line intersections are not implemented yet)")
-                        }
-                    }
-                }
-            }
-        }
-        intersections.sort_unstable_by(|(_pos, dist_squared), (_pos2, dist_squared2)| dist_squared.total_cmp(dist_squared2));
-        intersections.into_iter().map(|(pos, _dist_squared)| pos).collect()
-    }
-
     /// Returns the closest point in the mesh to the given point that is outside the mesh.
     #[inline(always)]
     fn closest_exterior_point(&self, point_outside_mesh: Vec2, max_dist: f32, polygon_filter: impl Fn(usize) -> bool) -> Option<(Vec2, u32, f32)> {
@@ -654,31 +533,6 @@ impl<'m> MeshAagu<'m> {
 
 
 
-#[derive(Debug, Copy, Clone)]
-enum LineSegmentProjection {
-    OutsideSmallerP1,
-    Inside,
-    OutsideBiggerP2,
-}
-/// If the projected line segment is on either `p1` or `p2` the point is seen as [`LineSegmentProjection::Inside`].
-#[inline(always)]
-fn _calc_projected_pos_on_line_segment(p1: Vec2, p2: Vec2, to_be_projected_pt: Vec2) -> LineSegmentProjection {
-    let p1_to_p2 = vec2(p2.x - p1.x, p2.y - p1.y);
-    let line_segment_dot = p1_to_p2.dot(p1_to_p2);
-
-    let p1_to_pr = vec2(to_be_projected_pt.x - p1.x, to_be_projected_pt.y - p1.y);
-    let projection_dot = p1_to_p2.dot(p1_to_pr);
-
-    if projection_dot < 0.0 {
-        LineSegmentProjection::OutsideSmallerP1
-    }
-    else if projection_dot > line_segment_dot {
-        LineSegmentProjection::OutsideBiggerP2
-    }
-    else {
-        LineSegmentProjection::Inside
-    }
-}
 /// Calculates the projection of the given point onto the given line.
 /// If the given point would be outside the given line segment, it is clipped to p1 or p2 - depending on which point is
 /// closer.
