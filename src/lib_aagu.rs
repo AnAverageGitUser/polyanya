@@ -128,6 +128,7 @@ impl PathApproxResultEnum {
     pub fn is_valid_situation(&self) -> bool {
         match self {
             PathApproxResultEnum::ValidPath => {true}
+            PathApproxResultEnum::NoValidPath => {true}
             PathApproxResultEnum::DifferentIslandsNoPath => {true}
             PathApproxResultEnum::DifferentIslandsFirstIsland => {true}
             PathApproxResultEnum::InfinitePrevention => {false}
@@ -159,6 +160,21 @@ pub fn new_direct_path(from: Vec2, to: Vec2) -> Path {
     Path {
         length: from.distance(to),
         path: vec![to]
+    }
+}
+
+pub fn new_possibly_corrected_path(from: Vec2, to: Vec2, from_orig: Vec2) -> Path {
+    if from != from_orig {
+        Path {
+            length: from_orig.distance(from) + from.distance(to),
+            path: vec![from, to]
+        }
+    }
+    else {
+        Path {
+            length: from.distance(to),
+            path: vec![to]
+        }
     }
 }
 
@@ -284,37 +300,35 @@ impl<'m> MeshAagu<'m> {
         let mut start_status = PointStatus::Original;
         let mut end_status = PointStatus::Original;
 
+        let fallback = ||{ new_direct_path(from_orig, to_orig) };
+
         if starting_polygon_index == u32::MAX {
-            (from, starting_polygon_index) = self.fix_start_point(&settings, from, to, starting_polygon_index)?;
+            match self.fix_outside_mesh_point(&settings.start, to, starting_polygon_index, fallback) {
+                Ok(res) => { (from, starting_polygon_index) = res; }
+                Err(res) => { return res; }
+            }
+            if from != from_orig {
+                start_status = PointStatus::Modified {
+                    original: from_orig,
+                    modified: from,
+                }
+            }
+        }
+
+        if ending_polygon_index == u32::MAX {
+            match self.fix_outside_mesh_point(&settings.end, to, starting_polygon_index, fallback) {
+                Ok(res) => { (to, ending_polygon_index) = res; }
+                Err(res) => { return res; }
+            }
+            if to != to_orig {
+                end_status = PointStatus::Modified {
+                    original: to_orig,
+                    modified: to,
+                }
+            }
         }
 
         let status = if starting_polygon_index == u32::MAX {
-            // let Some(possibly_corrected_start_point) = match settings.start {
-            //     PointCorrectionMode::NoCorrection => Some(from),
-            //     PointCorrectionMode::ClosestPointInMesh(max_dist) => self.closest_exterior_point(from, max_dist),
-            //     PointCorrectionMode::ClosestMeshEdge(max_dist) => self.closest_exterior_point_line_edge(from, max_dist),
-            // }
-            // else {
-            //     return PathApproxResult {
-            //         path: new_direct_path(from, to),
-            //         start: PointStatus::Original,
-            //         status: PathApproxResultEnum::NoValidPath,
-            //         end: PointStatus::Original,
-            //     }
-            // };
-            // from = possibly_corrected_start_point;
-            // starting_polygon_index = self.get_point_location_ignore_delta(from);
-            // if starting_polygon_index == u32::MAX {
-            //     // this must then be because of floating point inaccuracies...
-            //     // TODO: guess around the given point, for now just fail
-            //     return PathApproxResult {
-            //         path: new_direct_path(from, to),
-            //         start: PointStatus::Original,
-            //         status: PathApproxResultEnum::BugCrashPrevention,
-            //         end: PointStatus::Original,
-            //     }
-            // }
-
             if ending_polygon_index == u32::MAX {
                 return PathApproxResult {
                     path: new_direct_path(from, to),
@@ -389,8 +403,10 @@ impl<'m> MeshAagu<'m> {
                 self.mesh.scenarios.set(self.mesh.scenarios.get() + 1);
             }
             return PathApproxResult {
-                path: new_direct_path(from, to),
+                path: new_possibly_corrected_path(from, to, from_orig),
+                start: start_status,
                 status: PathApproxResultEnum::ValidPath,
+                end: end_status,
             }
         }
 
@@ -408,68 +424,132 @@ impl<'m> MeshAagu<'m> {
                 InstanceStep::Found(path) => {
                     return PathApproxResult {
                         path,
+                        start: start_status,
                         status,
+                        end: end_status,
                     };
                 },
                 InstanceStep::NotFound => {
-                    error!("Search from {from} to {to} failed. Please check if the mesh is valid as this should not happen as we've made sure that the two point are within the same mesh island");
+                    error!("Search from {from_orig} to {to_orig} failed. Please check if the mesh is valid as this should not happen as we've made sure that the two point are within the same mesh island");
                     return PathApproxResult {
-                        path: new_direct_path(from, to),
-                        status: PathApproxResultEnum::NoPath,
+                        path: new_direct_path(from_orig, to_orig),
+                        start: PointStatus::Original,
+                        status: PathApproxResultEnum::NoValidPath,
+                        end: PointStatus::Original,
                     }
                 }
                 InstanceStep::Continue => (),
             }
         }
 
-        error!("Search from {from} to {to} failed. Please check if the mesh is valid as this should not happen. Infinite prevention triggered.");
+        error!("Search from {from_orig} to {to_orig} failed. Please check if the mesh is valid as this should not happen. Infinite prevention triggered.");
         PathApproxResult {
-            path: new_direct_path(from, to),
+            path: new_direct_path(from_orig, to_orig),
+            start: PointStatus::Original,
             status: PathApproxResultEnum::InfinitePrevention,
+            end: PointStatus::Original,
         }
     }
 
-    fn fix_start_point(&self, settings: &NavigationRequestSettings, from: Vec2, to: Vec2, starting_polygon_index: u32)
-        -> Result<(Vec2, u32), PathApproxResult>
+    fn fix_outside_mesh_point(&self, mode: &PointCorrectionMode, outside_mesh_point: Vec2, polygon_index: u32, fallback: impl FnOnce() -> Path)
+                              -> Result<(Vec2, u32), PathApproxResult>
     {
-        if starting_polygon_index == u32::MAX {
-            let Some(possibly_corrected_start_point) = match settings.start {
-                PointCorrectionMode::NoCorrection => {
-                    return Err(PathApproxResult {
-                        path: new_direct_path(from, to),
-                        start: PointStatus::Original,
-                        status: PathApproxResultEnum::NoValidPath,
-                        end: PointStatus::Original,
-                    })
-                },
-                PointCorrectionMode::ClosestPointInMesh(max_dist) => self.closest_exterior_point(from, max_dist),
-                PointCorrectionMode::ClosestMeshEdge(max_dist) => self.closest_exterior_point_line_edge(from, max_dist),
-            }
-            else {
+        if polygon_index != u32::MAX {
+            return Ok((outside_mesh_point, polygon_index));
+        }
+
+        let corrected_opt = match mode {
+            PointCorrectionMode::NoCorrection => {
                 return Err(PathApproxResult {
-                    path: new_direct_path(from, to),
+                    path: fallback(),
                     start: PointStatus::Original,
                     status: PathApproxResultEnum::NoValidPath,
                     end: PointStatus::Original,
                 })
-            };
+            },
+            PointCorrectionMode::ClosestPointInMesh(max_dist) => self.closest_exterior_point(outside_mesh_point, *max_dist),
+            PointCorrectionMode::ClosestMeshEdge(max_dist) => self.closest_exterior_point_line_edge(outside_mesh_point, *max_dist),
+        };
 
-            let starting_polygon_index = self.get_point_location_ignore_delta(possibly_corrected_start_point);
-            if starting_polygon_index == u32::MAX {
-                // this must then be because of floating point inaccuracies...
-                // TODO: guess around the given point, for now just fail
-                return Err(PathApproxResult {
-                    path: new_direct_path(from, to),
-                    start: PointStatus::Original,
-                    status: PathApproxResultEnum::BugCrashPrevention,
-                    end: PointStatus::Original,
-                })
-            }
-            Ok((possibly_corrected_start_point, starting_polygon_index))
+        let Some((possibly_corrected_start_point, new_polygon_index, max_dist_sq)) = corrected_opt else {
+            return Err(PathApproxResult {
+                path: fallback(),
+                start: PointStatus::Original,
+                status: PathApproxResultEnum::NoValidPath,
+                end: PointStatus::Original,
+            })
+        };
+
+        debug_assert_ne!(new_polygon_index, u32::MAX, "The point was fixed, therefore a polygon with which it was fixed must have been found.");
+        if let Some(possibly_corrected_start_point) = self.fix_intersection_point(outside_mesh_point, possibly_corrected_start_point, new_polygon_index, max_dist_sq) {
+            Ok((possibly_corrected_start_point, new_polygon_index))
         }
         else {
-            Ok((from, starting_polygon_index))
+            // this should only happen because of floating point inaccuracies, and because the polygon was to small/thin
+            // if even the correction for the correction failed, we give up - this hopefully almost never happens
+            Err(PathApproxResult {
+                path: fallback(),
+                start: PointStatus::Original,
+                status: PathApproxResultEnum::BugCrashPrevention,
+                end: PointStatus::Original,
+            })
         }
+    }
+
+    fn fix_intersection_point(&self, point_orig: Vec2, point: Vec2, polygon_idx: u32, max_dist_sq: f32) -> Option<Vec2> {
+        {
+            let polygon_idx_test = self.get_point_location_ignore_delta(point);
+            if polygon_idx_test != u32::MAX {
+                debug_assert_eq!(polygon_idx, polygon_idx_test);
+                // this point is already good to go
+                return Some(point);
+            }
+        }
+        let concave_polygon = &self.mesh.polygons[polygon_idx as usize];
+        let concave_poly_center = concave_polygon.vertices
+            .iter()
+            .map(|idx| self.mesh.vertices[*idx as usize].coords)
+            .sum::<Vec2>()
+            / (concave_polygon.vertices.len() as f32);
+        {
+            let polygon_idx_test = self.get_point_location_ignore_delta(concave_poly_center);
+            if polygon_idx_test == u32::MAX {
+                // this should only happen because of floating point inaccuracies
+                // and because the polygon was to small/thin
+                return None;
+            }
+        }
+
+        let p_to_c = concave_poly_center - point;
+
+        macro_rules! return_if_in_mesh {
+            ($factor:expr) => {{
+                let between_edge_and_center = point + p_to_c * $factor;
+                let polygon_idx_test = self.get_point_location_ignore_delta(between_edge_and_center);
+                if polygon_idx_test != u32::MAX {
+                    debug_assert_eq!(polygon_idx, polygon_idx_test);
+
+                    if point_orig.distance_squared(between_edge_and_center) <= max_dist_sq {
+                        return Some(between_edge_and_center);
+                    }
+                    return None;
+                }
+            }};
+        }
+
+        // it's kind of stupid, but well...
+        // the order is important because of the max_dist_sq check
+        return_if_in_mesh!(0.00001);
+        return_if_in_mesh!(0.0001);
+        return_if_in_mesh!(0.001);
+        return_if_in_mesh!(0.01);
+        return_if_in_mesh!(0.1);
+        return_if_in_mesh!(0.25);
+        return_if_in_mesh!(0.5);
+        return_if_in_mesh!(0.75);
+
+        // we checked earlier that the center is "within" the polygon
+        Some(concave_poly_center)
     }
 
     /// Returns a vector with all polygon-edge intersections sorted by their distance to the given `from` point.
@@ -545,12 +625,12 @@ impl<'m> MeshAagu<'m> {
 
     /// Returns the closest point in the mesh to the given point that is outside the mesh.
     #[inline(always)]
-    fn closest_exterior_point(&self, point_outside_mesh: Vec2, max_allowed_dist: f32) -> Option<Vec2> {
-        let max_allowed_dist_sq = max_allowed_dist * max_allowed_dist;
+    fn closest_exterior_point(&self, point_outside_mesh: Vec2, max_dist: f32) -> Option<(Vec2, u32, f32)> {
+        let max_dist_sq = max_dist * max_dist;
         let mut closest = None;
-        let mut distance_squared = max_allowed_dist_sq;
-        for poly in &self.mesh.polygons {
-            let mut iter_1 = poly.vertices.iter();
+        let mut distance_squared = max_dist_sq;
+        for (poly_idx, poly) in self.mesh.polygons.iter().enumerate() {
+            let iter_1 = poly.vertices.iter();
             let mut iter_2 = poly.vertices.iter();
             iter_2.next();
             for (p1i, p2i) in iter_1.zip(iter_2.chain(iter::once(poly.vertices.first().expect("polygon must not be empty"))))
@@ -562,7 +642,7 @@ impl<'m> MeshAagu<'m> {
                 let dist_sq = on_line_segment.distance_squared(point_outside_mesh);
                 if dist_sq <= distance_squared { // use "<=" to overwrite possible "None" element
                     distance_squared = dist_sq;
-                    closest = Some(on_line_segment);
+                    closest = Some((on_line_segment, poly_idx as u32, max_dist_sq));
                 }
             }
         }
@@ -571,24 +651,24 @@ impl<'m> MeshAagu<'m> {
 
     /// Returns the closest point in the mesh to the given point that is outside the mesh.
     #[inline(always)]
-    fn closest_exterior_point_line_edge(&self, point_outside_mesh: Vec2, max_dist: f32) -> Option<Vec2> {
+    fn closest_exterior_point_line_edge(&self, point_outside_mesh: Vec2, max_dist: f32) -> Option<(Vec2, u32, f32)> {
         let max_dist_sq = max_dist * max_dist;
         let mut closest = None;
         let mut distance_squared = max_dist_sq;
-        for poly in &self.mesh.polygons {
+        for (poly_idx, poly) in self.mesh.polygons.iter().enumerate() {
             for vertex_idx in poly.vertices.iter() {
-                let p1 = self.mesh.vertices[*vertex_idx].coords;
+                let p1 = self.mesh.vertices[*vertex_idx as usize].coords;
                 let p1_dist_sq = p1.distance_squared(point_outside_mesh);
                 if p1_dist_sq <= distance_squared { // use "<=" to overwrite possible "None" element
                     distance_squared = p1_dist_sq;
-                    closest = Some(p1);
+                    closest = Some((p1, poly_idx as u32, max_dist_sq));
                 }
 
-                let p2 = self.mesh.vertices[*vertex_idx].coords;
+                let p2 = self.mesh.vertices[*vertex_idx as usize].coords;
                 let p2_dist_sq = p2.distance_squared(point_outside_mesh);
                 if p2_dist_sq <= distance_squared { // use "<=" to overwrite possible "None" element
                     distance_squared = p2_dist_sq;
-                    closest = Some(p2);
+                    closest = Some((p2, poly_idx as u32, max_dist_sq));
                 }
             }
         }
