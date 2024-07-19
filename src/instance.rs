@@ -154,7 +154,7 @@ impl<'m> SearchInstance<'m> {
         search_instance
     }
 
-    pub(crate) fn next(&mut self, remove_first_waypoint: bool) -> InstanceStep {
+    pub(crate) fn next(&mut self) -> InstanceStep {
         if let Some(next) = self.pop_node() {
             #[cfg(feature = "verbose")]
             println!("popped off: {}", next);
@@ -197,16 +197,12 @@ impl<'m> SearchInstance<'m> {
                     );
                     self.mesh.scenarios.set(self.mesh.scenarios.get() + 1);
                 }
-                let mut path = if remove_first_waypoint {
-                    next.path
-                        .split_first()
-                        .map(|(_, p)| p)
-                        .unwrap_or(&[])
-                        .to_vec()
-                }
-                else {
-                    next.path
-                };
+                let mut path = next
+                    .path
+                    .split_first()
+                    .map(|(_, p)| p)
+                    .unwrap_or(&[])
+                    .to_vec();
                 if next.root != self.from {
                     path.push(next.root);
                 }

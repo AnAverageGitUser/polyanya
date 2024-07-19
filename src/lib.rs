@@ -55,6 +55,7 @@ pub use input::trimesh::Trimesh;
 pub use primitives::{Polygon, Vertex};
 
 use crate::instance::SearchInstance;
+use crate::lib_aagu::NavigationRequestSettings;
 
 /// A path between two points.
 #[derive(Debug, PartialEq)]
@@ -316,7 +317,7 @@ impl Mesh {
 
         // Limit search to avoid an infinite loop.
         for _ in 0..self.polygons.len() * 1000 {
-            match search_instance.next(true) {
+            match search_instance.next() {
                 InstanceStep::Found(path) => return Some(path),
                 InstanceStep::NotFound => return None,
                 InstanceStep::Continue => (),
@@ -506,9 +507,9 @@ impl Mesh {
     ///     that is still reachable from the starting point.
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
     #[inline(always)]
-    pub fn approx_path(&self, from: Vec2, to: Vec2) -> lib_aagu::PathApproxResult {
+    pub fn approx_path(&self, from: Vec2, to: Vec2, settings: NavigationRequestSettings) -> lib_aagu::PathApproxResult {
         lib_aagu::MeshAagu { mesh: &self }
-            .approx_path(from, to)
+            .approx_path(from, to, settings)
     }
 }
 

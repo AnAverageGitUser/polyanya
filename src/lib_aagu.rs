@@ -288,23 +288,22 @@ impl<'m> MeshAagu<'m> {
     ///   - the target point will be replaced by the point that is closest to the target point,
     ///     that is still reachable from the starting point.
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
-    pub fn approx_path(&self, settings: NavigationRequestSettings, mut from: Vec2, mut to: Vec2) -> PathApproxResult {
+    pub fn approx_path(&self, mut from: Vec2, mut to: Vec2, settings: NavigationRequestSettings) -> PathApproxResult {
         #[cfg(feature = "stats")]
         let start = std::time::Instant::now();
 
         let from_orig = from;
         let to_orig = to;
-        let mut starting_polygon_index = self.get_point_location_ignore_delta(from);
-        let mut ending_polygon_index = self.get_point_location_ignore_delta(to);
-        let mut remove_first_waypoint = true;
+        let mut starting_polygon_idx = self.get_point_location_ignore_delta(from);
+        let mut ending_polygon_idx = self.get_point_location_ignore_delta(to);
         let mut start_status = PointStatus::Original;
         let mut end_status = PointStatus::Original;
 
         let fallback = ||{ new_direct_path(from_orig, to_orig) };
 
-        if starting_polygon_index == u32::MAX {
-            match self.fix_outside_mesh_point(&settings.start, to, starting_polygon_index, fallback) {
-                Ok(res) => { (from, starting_polygon_index) = res; }
+        if starting_polygon_idx == u32::MAX {
+            match self.fix_outside_mesh_point(&settings.start, to, starting_polygon_idx, fallback, |_| true) {
+                Ok(res) => { (from, starting_polygon_idx) = res; }
                 Err(res) => { return res; }
             }
             if from != from_orig {
@@ -315,9 +314,15 @@ impl<'m> MeshAagu<'m> {
             }
         }
 
-        if ending_polygon_index == u32::MAX {
-            match self.fix_outside_mesh_point(&settings.end, to, starting_polygon_index, fallback) {
-                Ok(res) => { (to, ending_polygon_index) = res; }
+        let islands = self.mesh.islands.as_ref().expect("island baking is a prerequisite");
+        let starting_island = islands[starting_polygon_idx as usize];
+        let same_island_as_start = |poly_idx: usize| {
+            islands[poly_idx] == starting_island
+        };
+
+        if ending_polygon_idx == u32::MAX {
+            match self.fix_outside_mesh_point(&settings.end, to, starting_polygon_idx, fallback, same_island_as_start) {
+                Ok(res) => { (to, ending_polygon_idx) = res; }
                 Err(res) => { return res; }
             }
             if to != to_orig {
@@ -328,65 +333,7 @@ impl<'m> MeshAagu<'m> {
             }
         }
 
-        let status = if starting_polygon_index == u32::MAX {
-            if ending_polygon_index == u32::MAX {
-                return PathApproxResult {
-                    path: new_direct_path(from, to),
-                    status: PathApproxResultEnum::BothOutside,
-                };
-            }
-            // move start onto the closest island along the direct start-end-line
-            remove_first_waypoint = false;
-            let intersections = self.all_line_intersections(from, to);
-            if intersections.is_empty() {
-                // better buggy movement than an application crash!
-                return PathApproxResult {
-                    path: new_direct_path(from, to),
-                    status: PathApproxResultEnum::BugCrashPrevention,
-                };
-            }
-            (starting_polygon_index, from) = self.approx_path_fix_start(ending_polygon_index, from, to, &intersections);
-            // move end onto the same island
-            (ending_polygon_index, to) = self.approx_path_fix_end(starting_polygon_index, from, to, &intersections);
-            PathApproxResultEnum::StartOutside
-        }
-        else if ending_polygon_index == u32::MAX {
-            // move end onto the same island
-            let intersections = self.all_line_intersections(from, to);
-            if intersections.is_empty() {
-                // better buggy movement than an application crash!
-                return PathApproxResult {
-                    path: new_direct_path(from, to),
-                    status: PathApproxResultEnum::BugCrashPrevention,
-                };
-            }
-            (ending_polygon_index, to) = self.approx_path_fix_end(starting_polygon_index, from, to, &intersections);
-            PathApproxResultEnum::EndOutside
-        }
-        else {
-            let islands = self.mesh.islands.as_ref().expect("islands must exist");
-            let start_island = islands.get(starting_polygon_index as usize).expect("start point island must exist");
-            let end_island = islands.get(ending_polygon_index as usize).expect("end point island must exist");
-            if start_island != end_island {
-                // move end onto the same island
-                let intersections = self.all_line_intersections(from, to);
-                if intersections.is_empty() {
-                    // better buggy movement than an application crash!
-                    return PathApproxResult {
-                        path: new_direct_path(from, to),
-                        status: PathApproxResultEnum::BugCrashPrevention,
-                    };
-                }
-                (ending_polygon_index, to) = self.approx_path_fix_end(starting_polygon_index, from, to, &intersections);
-                PathApproxResultEnum::NoPath
-            }
-            else {
-                PathApproxResultEnum::ValidPath
-            }
-        };
-
-
-        if starting_polygon_index == ending_polygon_index {
+        if starting_polygon_idx == ending_polygon_idx {
             #[cfg(feature = "stats")]
             {
                 if self.mesh.scenarios.get() == 0 {
@@ -412,20 +359,20 @@ impl<'m> MeshAagu<'m> {
 
         let mut search_instance = SearchInstance::setup(
             self.mesh,
-            (from, starting_polygon_index),
-            (to, ending_polygon_index),
+            (from, starting_polygon_idx),
+            (to, ending_polygon_idx),
             #[cfg(feature = "stats")]
             start,
         );
 
         // Limit search to avoid an infinite loop.
         for _ in 0..self.mesh.polygons.len() * 1000 {
-            match search_instance.next(remove_first_waypoint) {
+            match search_instance.next() {
                 InstanceStep::Found(path) => {
                     return PathApproxResult {
                         path,
                         start: start_status,
-                        status,
+                        status: PathApproxResultEnum::ValidPath,
                         end: end_status,
                     };
                 },
@@ -451,8 +398,15 @@ impl<'m> MeshAagu<'m> {
         }
     }
 
-    fn fix_outside_mesh_point(&self, mode: &PointCorrectionMode, outside_mesh_point: Vec2, polygon_index: u32, fallback: impl FnOnce() -> Path)
-                              -> Result<(Vec2, u32), PathApproxResult>
+    fn fix_outside_mesh_point(
+        &self,
+        mode: &PointCorrectionMode,
+        outside_mesh_point: Vec2,
+        polygon_index: u32,
+        fallback: impl FnOnce() -> Path,
+        polygon_filter: impl Fn(usize) -> bool,
+    )
+        -> Result<(Vec2, u32), PathApproxResult>
     {
         if polygon_index != u32::MAX {
             return Ok((outside_mesh_point, polygon_index));
@@ -467,8 +421,8 @@ impl<'m> MeshAagu<'m> {
                     end: PointStatus::Original,
                 })
             },
-            PointCorrectionMode::ClosestPointInMesh(max_dist) => self.closest_exterior_point(outside_mesh_point, *max_dist),
-            PointCorrectionMode::ClosestMeshEdge(max_dist) => self.closest_exterior_point_line_edge(outside_mesh_point, *max_dist),
+            PointCorrectionMode::ClosestPointInMesh(max_dist) => self.closest_exterior_point(outside_mesh_point, *max_dist, polygon_filter),
+            PointCorrectionMode::ClosestMeshEdge(max_dist) => self.closest_exterior_point_line_edge(outside_mesh_point, *max_dist, polygon_filter),
         };
 
         let Some((possibly_corrected_start_point, new_polygon_index, max_dist_sq)) = corrected_opt else {
@@ -625,11 +579,16 @@ impl<'m> MeshAagu<'m> {
 
     /// Returns the closest point in the mesh to the given point that is outside the mesh.
     #[inline(always)]
-    fn closest_exterior_point(&self, point_outside_mesh: Vec2, max_dist: f32) -> Option<(Vec2, u32, f32)> {
+    fn closest_exterior_point(&self, point_outside_mesh: Vec2, max_dist: f32, polygon_filter: impl Fn(usize) -> bool) -> Option<(Vec2, u32, f32)> {
         let max_dist_sq = max_dist * max_dist;
         let mut closest = None;
         let mut distance_squared = max_dist_sq;
         for (poly_idx, poly) in self.mesh.polygons.iter().enumerate() {
+            if !polygon_filter(poly_idx) {
+                // do not consider this polygon because of the filter predicate
+                continue;
+            }
+
             let iter_1 = poly.vertices.iter();
             let mut iter_2 = poly.vertices.iter();
             iter_2.next();
@@ -651,11 +610,16 @@ impl<'m> MeshAagu<'m> {
 
     /// Returns the closest point in the mesh to the given point that is outside the mesh.
     #[inline(always)]
-    fn closest_exterior_point_line_edge(&self, point_outside_mesh: Vec2, max_dist: f32) -> Option<(Vec2, u32, f32)> {
+    fn closest_exterior_point_line_edge(&self, point_outside_mesh: Vec2, max_dist: f32, polygon_filter: impl Fn(usize) -> bool) -> Option<(Vec2, u32, f32)> {
         let max_dist_sq = max_dist * max_dist;
         let mut closest = None;
         let mut distance_squared = max_dist_sq;
         for (poly_idx, poly) in self.mesh.polygons.iter().enumerate() {
+            if !polygon_filter(poly_idx) {
+                // do not consider this polygon because of the filter predicate
+                continue;
+            }
+
             for vertex_idx in poly.vertices.iter() {
                 let p1 = self.mesh.vertices[*vertex_idx as usize].coords;
                 let p1_dist_sq = p1.distance_squared(point_outside_mesh);
