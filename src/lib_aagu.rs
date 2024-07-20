@@ -1,6 +1,6 @@
 use std::iter;
 use glam::{Vec2, vec2};
-use log::{error, warn};
+use log::error;
 use crate::instance::{InstanceStep, SearchInstance};
 use crate::{Mesh, Path};
 
@@ -50,15 +50,16 @@ pub enum PointCorrectionMode {
 /// The mode given to the navigation algorithm to determine which kind of behaviour we expect when the
 /// (possibly corrected) start point or (possibly corrected) end point are on different islands.
 #[derive(Debug, Copy, Clone)]
-pub enum IslandTraversalMode {
+pub enum DifferentIslandMode {
     /// If the (possibly corrected) start point and the (possibly corrected) end point are on different islands,
     /// return no path.
-    NoTraversal,
+    NoPath,
     /// If the (possibly corrected) start point and the (possibly corrected) end point are on different islands,
-    /// change the (possibly corrected) end point to the closest point that is on the same island as the
-    /// (possibly corrected) start point and the original uncorrected end point,
-    /// but only if that point is not farther away than the given distance.
-    ClosestOnStartIsland(f32),
+    /// change the end point to the closest point that is on the same island as the (possibly corrected) start point and
+    /// adheres to the end points [`PointCorrectionMode`].
+    ///
+    /// If not such end point can be found, return no path.
+    ClosestOnStartIsland,
 }
 /// The settings for the navigation algorithm.
 /// Certain situation can be configured to be handled differently.
@@ -66,8 +67,8 @@ pub enum IslandTraversalMode {
 pub struct NavigationRequestSettings {
     /// The [`PointCorrectionMode`] of this navigation request's start point.
     pub start: PointCorrectionMode,
-    /// The [`IslandTraversalMode`] of this navigation request.
-    pub islands: IslandTraversalMode,
+    /// The [`DifferentIslandMode`] of this navigation request.
+    pub islands: DifferentIslandMode,
     /// The [`PointCorrectionMode`] of this navigation request's end point.
     pub end: PointCorrectionMode,
     /// A placeholder, *not used right now*.
@@ -82,12 +83,23 @@ pub struct NavigationRequestSettings {
     /// This can be used as an optimization to terminate some paths early on if they are to far away.
     pub _max_length: f32,
 }
+impl Default for NavigationRequestSettings {
+    fn default() -> Self {
+        Self {
+            start: PointCorrectionMode::ClosestPointInMesh(f32::INFINITY),
+            islands: DifferentIslandMode::ClosestOnStartIsland,
+            end: PointCorrectionMode::ClosestPointInMesh(f32::INFINITY),
+            _agent_radius: 0.0,
+            _max_length: 0.0,
+        }
+    }
+}
 
 /// A status indication if a start/end point was modified and if yes to what.
 #[derive(Debug, Copy, Clone)]
 pub enum PointStatus {
     /// The point was not modified.
-    Original,
+    Original(Vec2),
     /// The point was modified according to the given setting.
     Modified {
         /// The original point that was not within the mesh.
@@ -98,42 +110,44 @@ pub enum PointStatus {
 }
 /// TODO
 #[derive(Debug, Copy, Clone)]
-pub enum PathApproxResultEnum {
+pub enum NavigationResultStatus {
     /// The (possibly corrected) start point and (possibly corrected) end point are within the same mesh islands and
     /// a path was found.
-    ValidPath,/// The start- and end-points are within different mesh islands.
-    /// There cannot exist a valid path between the two points.
+    PathFound,
+
+    /// The start- and/or end-points were not within the mesh and could not be rectified because of their
+    /// [`PointCorrectionMode`].
     ///
-    /// A direct path that ignores the mesh-bounds is given.
-    NoValidPath,
-    /// The (possibly corrected) start point and (possibly corrected) end point are on different mesh islands and
-    /// the navigation request did not allow creating a path.
-    DifferentIslandsNoPath,
-    /// The (possibly corrected) start point and (possibly corrected) end point are on different mesh islands and
-    /// the navigation request did allow creating a path that lets the agent move closer to the target, but only within
-    /// the starting point's island.
-    DifferentIslandsFirstIsland,
+    /// No path is given as a result.
+    OutsideMesh,
+
+    /// The (possibly corrected) start point and (possibly corrected) end point are on different mesh islands.
+    /// If a path is returned and what path is returned depends on the given [`DifferentIslandMode`].
+    DifferentIslands,
+
     /// The start- and end-point are within the same mesh islands, but a path could not be found and deadlock prevention
     /// kicked in.
     /// This is a bug, but does not seem to happen frequently enough to be important.
     ///
-    /// A direct path that ignores the mesh-bounds is given.
-    InfinitePrevention,
-    /// The navigation algorithm has a bug, instead of crashing the application, this result was returned.
+    /// No path is given as a result.
+    BugInfinitePrevention,
+
+    /// The navigation algorithm has a bug: it can not handle some situations due to floating point inaccuracies.
+    /// This is specific to the shape and size of the navmesh's polygons.
+    /// Extremely small and or extremely thin polygons could trigger this behaviour.
     ///
-    /// A direct path that ignores the mesh-bounds is given.
-    BugCrashPrevention,
+    /// No path is given as a result.
+    BugFloatingPointInaccuracies,
 }
-impl PathApproxResultEnum {
+impl NavigationResultStatus {
     /// True if the situation is expected to occur.
     pub fn is_valid_situation(&self) -> bool {
         match self {
-            PathApproxResultEnum::ValidPath => {true}
-            PathApproxResultEnum::NoValidPath => {true}
-            PathApproxResultEnum::DifferentIslandsNoPath => {true}
-            PathApproxResultEnum::DifferentIslandsFirstIsland => {true}
-            PathApproxResultEnum::InfinitePrevention => {false}
-            PathApproxResultEnum::BugCrashPrevention => {false}
+            NavigationResultStatus::PathFound => {true}
+            NavigationResultStatus::OutsideMesh => {true}
+            NavigationResultStatus::DifferentIslands => {true}
+            NavigationResultStatus::BugInfinitePrevention => {false}
+            NavigationResultStatus::BugFloatingPointInaccuracies => {false}
         }
     }
 }
@@ -143,30 +157,48 @@ pub struct PathApproxResultStatus {
     /// TODO
     pub start: PointStatus,
     /// TODO
-    pub status: PathApproxResultEnum,
+    pub status: NavigationResultStatus,
     /// TODO
     pub end: PointStatus,
 }
+impl PathApproxResultStatus {
+    /// Constructor
+    pub fn new(start: PointStatus, end: PointStatus, status: NavigationResultStatus) -> Self {
+        Self {
+            start,
+            status,
+            end,
+        }
+    }
+    /// Build like setter for status.
+    pub fn with_status(mut self, status: NavigationResultStatus) -> Self {
+        self.status = status;
+        self
+    }
+    /// Build like setter for start.
+    pub fn with_start(mut self, start: PointStatus) -> Self {
+        self.start = start;
+        self
+    }
+    /// Build like setter for end.
+    pub fn with_end(mut self, end: PointStatus) -> Self {
+        self.end = end;
+        self
+    }
+}
+
 /// TODO
 #[derive(Debug)]
 pub struct PathApproxResult {
     /// TODO
-    pub path: Path,
+    pub path: Option<Path>,
     /// TODO
     pub status: PathApproxResultStatus,
 }
 impl PathApproxResult {
     /// Gets the last element of the path: the destination.
     pub fn get_end(&self) -> &Vec2 {
-        self.path.path.last().expect("expected path to never be empty")
-    }
-}
-
-/// Creates a new object with the target as single waypoint.
-fn new_direct_path(from: Vec2, to: Vec2) -> Path {
-    Path {
-        length: from.distance(to),
-        path: vec![to]
+        self.path.as_ref().expect("expected path to exist").path.last().expect("expected path to never be empty")
     }
 }
 
@@ -209,42 +241,63 @@ impl<'m> MeshAagu<'m> {
         let to_orig = to;
         let mut starting_polygon_idx = self.get_point_location_ignore_delta(from);
         let mut ending_polygon_idx = self.get_point_location_ignore_delta(to);
-        let mut start_status = PointStatus::Original;
-        let mut end_status = PointStatus::Original;
-
-        let fallback = ||{ new_direct_path(from_orig, to_orig) };
+        let mut status = PathApproxResultStatus{
+            start: PointStatus::Original(from_orig),
+            status: NavigationResultStatus::PathFound,
+            end: PointStatus::Original(to_orig),
+        };
 
         if starting_polygon_idx == u32::MAX {
-            match self.fix_outside_mesh_point(&settings.start, to, starting_polygon_idx, fallback, |_| true) {
+            match self.fix_outside_mesh_point(&settings.start, from, |_| true) {
                 Ok(res) => { (from, starting_polygon_idx) = res; }
-                Err(res) => { return res; }
-            }
-            if from != from_orig {
-                start_status = PointStatus::Modified {
-                    original: from_orig,
-                    modified: from,
+                Err(nav_res_status) => {
+                    return PathApproxResult { path: None, status: status.with_status(nav_res_status) };
                 }
             }
+            if from != from_orig {
+                status = status.with_start(PointStatus::Modified { original: from_orig, modified: from })
+            }
         }
+        debug_assert_ne!(starting_polygon_idx, u32::MAX);
 
         let islands = self.mesh.islands.as_ref().expect("island baking is a prerequisite");
         let starting_island = islands[starting_polygon_idx as usize];
         let same_island_as_start = |poly_idx: usize| {
             islands[poly_idx] == starting_island
         };
-
-        if ending_polygon_idx == u32::MAX {
-            match self.fix_outside_mesh_point(&settings.end, to, starting_polygon_idx, fallback, same_island_as_start) {
-                Ok(res) => { (to, ending_polygon_idx) = res; }
-                Err(res) => { return res; }
+        
+        match settings.islands {
+            DifferentIslandMode::NoPath => {
+                if ending_polygon_idx == u32::MAX {
+                    return PathApproxResult {
+                        path: None,
+                        status: status.with_status(NavigationResultStatus::OutsideMesh),
+                    }
+                }
+                else {
+                    if islands[ending_polygon_idx as usize] != starting_island {
+                        return PathApproxResult {
+                            path: None,
+                            status: status.with_status(NavigationResultStatus::DifferentIslands),
+                        };
+                    }
+                }
             }
-            if to != to_orig {
-                end_status = PointStatus::Modified {
-                    original: to_orig,
-                    modified: to,
+            DifferentIslandMode::ClosestOnStartIsland => {
+                if ending_polygon_idx == u32::MAX || islands[ending_polygon_idx as usize] != starting_island {
+                    match self.fix_outside_mesh_point(&settings.end, to, same_island_as_start) {
+                        Ok(res) => { (to, ending_polygon_idx) = res; }
+                        Err(nav_res_status) => {
+                            return PathApproxResult { path: None, status: status.with_status(nav_res_status) };
+                        }
+                    }
+                    if to != to_orig {
+                        status = status.with_end(PointStatus::Modified { original: to_orig, modified: to })
+                    }
                 }
             }
         }
+        debug_assert_ne!(ending_polygon_idx, u32::MAX);
 
         if starting_polygon_idx == ending_polygon_idx {
             #[cfg(feature = "stats")]
@@ -263,12 +316,8 @@ impl<'m> MeshAagu<'m> {
                 self.mesh.scenarios.set(self.mesh.scenarios.get() + 1);
             }
             return PathApproxResult {
-                path: new_possibly_corrected_path(from, to, from_orig),
-                status: PathApproxResultStatus {
-                    start: start_status,
-                    status: PathApproxResultEnum::ValidPath,
-                    end: end_status,
-                }
+                path: Some(new_possibly_corrected_path(from, to, from_orig)),
+                status: status.with_status(NavigationResultStatus::PathFound),
             }
         }
 
@@ -282,81 +331,50 @@ impl<'m> MeshAagu<'m> {
 
         // Limit search to avoid an infinite loop.
         for _ in 0..self.mesh.polygons.len() * 1000 {
-            match search_instance.next() {
+            match search_instance.next(false) {
                 InstanceStep::Found(path) => {
-                    return PathApproxResult {
-                        path,
-                        status: PathApproxResultStatus {
-                            start: start_status,
-                            status: PathApproxResultEnum::ValidPath,
-                            end: end_status,
-                        }
-                    };
+                    return PathApproxResult { path: Some(path), status: status.with_status(NavigationResultStatus::PathFound) };
                 },
                 InstanceStep::NotFound => {
-                    error!("Search from {from_orig} to {to_orig} failed. Please check if the mesh is valid as this should not happen as we've made sure that the two point are within the same mesh island");
-                    return PathApproxResult {
-                        path: new_direct_path(from_orig, to_orig),
-                        status: PathApproxResultStatus {
-                            start: PointStatus::Original,
-                            status: PathApproxResultEnum::NoValidPath,
-                            end: PointStatus::Original,
-                        }
-                    }
+                    error!("Search from {from_orig} (corrected {from}) to {to_orig} (corrected {to}) failed. Please check if the mesh is valid as this should not happen as we've made sure that the two point are within the same mesh island.");
+                    return PathApproxResult { path: None, status: status.with_status(NavigationResultStatus::OutsideMesh) }
                 }
                 InstanceStep::Continue => (),
             }
         }
 
-        error!("Search from {from_orig} to {to_orig} failed. Please check if the mesh is valid as this should not happen. Infinite prevention triggered.");
-        PathApproxResult {
-            path: new_direct_path(from_orig, to_orig),
-            status: PathApproxResultStatus {
-                start: PointStatus::Original,
-                status: PathApproxResultEnum::InfinitePrevention,
-                end: PointStatus::Original,
-            }
-        }
+        error!("Search from {from_orig} (corrected {from}) to {to_orig} (corrected {to}) failed. Please check if the mesh is valid as this should not happen. Infinite prevention triggered.");
+        PathApproxResult { path: None, status: status.with_status(NavigationResultStatus::BugInfinitePrevention) }
     }
 
     fn fix_outside_mesh_point(
         &self,
         mode: &PointCorrectionMode,
         outside_mesh_point: Vec2,
-        polygon_index: u32,
-        fallback: impl FnOnce() -> Path,
         polygon_filter: impl Fn(usize) -> bool,
     )
-        -> Result<(Vec2, u32), PathApproxResult>
+        -> Result<(Vec2, u32), NavigationResultStatus>
     {
-        if polygon_index != u32::MAX {
-            return Ok((outside_mesh_point, polygon_index));
-        }
-
         let corrected_opt = match mode {
             PointCorrectionMode::NoCorrection => {
-                return Err(PathApproxResult {
-                    path: fallback(),
-                    status: PathApproxResultStatus {
-                        start: PointStatus::Original,
-                        status: PathApproxResultEnum::NoValidPath,
-                        end: PointStatus::Original,
-                    }
-                })
+                return Err(NavigationResultStatus::OutsideMesh);
             },
-            PointCorrectionMode::ClosestPointInMesh(max_dist) => self.closest_exterior_point(outside_mesh_point, *max_dist, polygon_filter),
-            PointCorrectionMode::ClosestMeshEdge(max_dist) => self.closest_exterior_point_line_edge(outside_mesh_point, *max_dist, polygon_filter),
+            PointCorrectionMode::ClosestPointInMesh(max_dist) => {
+                if *max_dist == 0.0 {
+                    return Err(NavigationResultStatus::OutsideMesh);
+                }
+                self.closest_exterior_point(outside_mesh_point, *max_dist, polygon_filter)
+            }
+            PointCorrectionMode::ClosestMeshEdge(max_dist) => {
+                if *max_dist == 0.0 {
+                    return Err(NavigationResultStatus::OutsideMesh);
+                }
+                self.closest_exterior_point_line_edge(outside_mesh_point, *max_dist, polygon_filter)
+            }
         };
 
         let Some((possibly_corrected_start_point, new_polygon_index, max_dist_sq)) = corrected_opt else {
-            return Err(PathApproxResult {
-                path: fallback(),
-                status: PathApproxResultStatus {
-                    start: PointStatus::Original,
-                    status: PathApproxResultEnum::NoValidPath,
-                    end: PointStatus::Original,
-                }
-            })
+            return Err(NavigationResultStatus::OutsideMesh)
         };
 
         debug_assert_ne!(new_polygon_index, u32::MAX, "The point was fixed, therefore a polygon with which it was fixed must have been found.");
@@ -366,14 +384,7 @@ impl<'m> MeshAagu<'m> {
         else {
             // this should only happen because of floating point inaccuracies, and because the polygon was to small/thin
             // if even the correction for the correction failed, we give up - this hopefully almost never happens
-            Err(PathApproxResult {
-                path: fallback(),
-                status: PathApproxResultStatus {
-                    start: PointStatus::Original,
-                    status: PathApproxResultEnum::BugCrashPrevention,
-                    end: PointStatus::Original,
-                }
-            })
+            Err(NavigationResultStatus::BugFloatingPointInaccuracies)
         }
     }
 
@@ -381,7 +392,6 @@ impl<'m> MeshAagu<'m> {
         {
             let polygon_idx_test = self.get_point_location_ignore_delta(point);
             if polygon_idx_test != u32::MAX {
-                debug_assert_eq!(polygon_idx, polygon_idx_test);
                 // this point is already good to go
                 return Some(point);
             }
@@ -408,8 +418,6 @@ impl<'m> MeshAagu<'m> {
                 let between_edge_and_center = point + p_to_c * $factor;
                 let polygon_idx_test = self.get_point_location_ignore_delta(between_edge_and_center);
                 if polygon_idx_test != u32::MAX {
-                    debug_assert_eq!(polygon_idx, polygon_idx_test);
-
                     if point_orig.distance_squared(between_edge_and_center) <= max_dist_sq {
                         return Some(between_edge_and_center);
                     }

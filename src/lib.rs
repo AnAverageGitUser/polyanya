@@ -317,7 +317,7 @@ impl Mesh {
 
         // Limit search to avoid an infinite loop.
         for _ in 0..self.polygons.len() * 1000 {
-            match search_instance.next() {
+            match search_instance.next(true) {
                 InstanceStep::Found(path) => return Some(path),
                 InstanceStep::NotFound => return None,
                 InstanceStep::Continue => (),

@@ -38,7 +38,7 @@ impl<'m> Future for FuturePath<'m> {
     ) -> Poll<Self::Output> {
         if let Some(search_instance) = self.instance.as_mut() {
             for _i in 0..3 {
-                match search_instance.next() {
+                match search_instance.next(true) {
                     InstanceStep::Found(path) => return Poll::Ready(Some(path)),
                     InstanceStep::NotFound => return Poll::Ready(None),
                     InstanceStep::Continue => {}
