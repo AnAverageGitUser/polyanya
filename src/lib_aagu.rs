@@ -247,8 +247,9 @@ impl<'m> MeshAagu<'m> {
             end: PointStatus::Original(to_orig),
         };
 
+        let any_island = |_| true;
         if starting_polygon_idx == u32::MAX {
-            match self.fix_outside_mesh_point(&settings.start, from, |_| true) {
+            match self.fix_outside_mesh_point(&settings.start, from, any_island) {
                 Ok(res) => { (from, starting_polygon_idx) = res; }
                 Err(nav_res_status) => {
                     return PathApproxResult { path: None, status: status.with_status(nav_res_status) };
@@ -262,16 +263,27 @@ impl<'m> MeshAagu<'m> {
 
         let islands = self.mesh.islands.as_ref().expect("island baking is a prerequisite");
         let starting_island = islands[starting_polygon_idx as usize];
-        let same_island_as_start = |poly_idx: usize| {
-            islands[poly_idx] == starting_island
-        };
-        
+
         match settings.islands {
             DifferentIslandMode::NoPath => {
                 if ending_polygon_idx == u32::MAX {
-                    return PathApproxResult {
-                        path: None,
-                        status: status.with_status(NavigationResultStatus::OutsideMesh),
+                    // use any_island, if a different island is closer, we must know it, as this was requested
+                    match self.fix_outside_mesh_point(&settings.end, to, any_island) {
+                        Ok(res) => { (to, ending_polygon_idx) = res; }
+                        Err(nav_res_status) => {
+                            return PathApproxResult { path: None, status: status.with_status(nav_res_status) };
+                        }
+                    }
+                    if to != to_orig {
+                        status = status.with_end(PointStatus::Modified { original: to_orig, modified: to })
+                    }
+                    if starting_island != islands[ending_polygon_idx as usize] {
+                        // in this case, the corrected target point got snapped to its closest island
+                        // but the island was different to the start island
+                        return PathApproxResult {
+                            path: None,
+                            status: status.with_status(NavigationResultStatus::DifferentIslands),
+                        }
                     }
                 }
                 else {
@@ -285,6 +297,9 @@ impl<'m> MeshAagu<'m> {
             }
             DifferentIslandMode::ClosestOnStartIsland => {
                 if ending_polygon_idx == u32::MAX || islands[ending_polygon_idx as usize] != starting_island {
+                    let same_island_as_start = |poly_idx: usize| {
+                        islands[poly_idx] == starting_island
+                    };
                     match self.fix_outside_mesh_point(&settings.end, to, same_island_as_start) {
                         Ok(res) => { (to, ending_polygon_idx) = res; }
                         Err(nav_res_status) => {
