@@ -511,6 +511,15 @@ impl Mesh {
         lib_aagu::MeshAagu { mesh: &self }
             .approx_path(from, to, settings)
     }
+
+    /// Retrieve the island ID that the given point is in.
+    /// If the point is not within any islands, `None` is retured.
+    #[cfg_attr(feature = "tracing", instrument(skip_all))]
+    #[inline(always)]
+    pub fn get_island_id(&self, pos: Vec2) -> Option<u32> {
+        lib_aagu::MeshAagu { mesh: &self }
+            .get_island_id(pos)
+    }
 }
 
 #[derive(PartialEq, Debug)]

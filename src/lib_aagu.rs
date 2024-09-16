@@ -223,6 +223,19 @@ pub struct MeshAagu<'m> {
     pub(crate) mesh: &'m Mesh,
 }
 impl<'m> MeshAagu<'m> {
+
+    /// Retrieve the island ID that the given point is in.
+    /// If the point is not within any islands, `None` is retured.
+    pub fn get_island_id(&self, pos: Vec2) -> Option<u32> {
+        let island_id = self.get_point_location_ignore_delta(pos);
+        if island_id == u32::MAX {
+            None
+        }
+        else {
+            Some(island_id)
+        }
+    }
+
     /// Compute a path between two points.
     /// This method is blocking.
     /// - If the starting point and the end point are within the mesh:
