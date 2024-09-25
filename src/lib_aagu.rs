@@ -47,6 +47,11 @@ pub enum PointCorrectionMode {
     /// If you want to allow arbitrary distances, parameterize with `f32::INFINITY`.
     ClosestMeshEdge(f32),
 }
+impl Default for PointCorrectionMode {
+    fn default() -> Self {
+        PointCorrectionMode::ClosestPointInMesh(f32::INFINITY)
+    }
+}
 /// The mode given to the navigation algorithm to determine which kind of behaviour we expect when the
 /// (possibly corrected) start point or (possibly corrected) end point are on different islands.
 #[derive(Debug, Copy, Clone)]
@@ -60,6 +65,11 @@ pub enum DifferentIslandMode {
     ///
     /// If not such end point can be found, return no path.
     ClosestOnStartIsland,
+}
+impl Default for DifferentIslandMode {
+    fn default() -> Self {
+        DifferentIslandMode::ClosestOnStartIsland
+    }
 }
 /// The settings for the navigation algorithm.
 /// Certain situation can be configured to be handled differently.
