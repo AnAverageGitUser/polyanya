@@ -241,6 +241,11 @@ pub struct MeshAagu<'m> {
 }
 impl<'m> MeshAagu<'m> {
 
+    /// Create a new `MeshAagu` wrapper around the given mesh.
+    pub fn new(mesh: &'m Mesh) -> Self {
+        Self { mesh }
+    }
+
     /// Retrieve the island ID that the given point is in.
     /// If the point is not within any islands, `None` is retured.
     pub fn get_island_id(&self, pos: Vec2) -> Option<u32> {
@@ -621,4 +626,403 @@ fn _project_point_onto_line(p1: Vec2, p2: Vec2, to_be_projected_pt: Vec2) -> Vec
     let projection_dot = p1_to_p2.dot(p1_to_pr);
     let len_squared = p1_to_p2.x * p1_to_p2.x + p1_to_p2.y * p1_to_p2.y;
     p1 + (projection_dot * p1_to_p2) / len_squared
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Mesh, Triangulation};
+    use glam::vec2;
+
+    /// Helper: build a simple square mesh [0,10]x[0,10] with a square obstacle, bake it.
+    fn simple_mesh_with_obstacle() -> Mesh {
+        let mut tri = Triangulation::from_outer_edges(&[
+            vec2(0.0, 0.0),
+            vec2(10.0, 0.0),
+            vec2(10.0, 10.0),
+            vec2(0.0, 10.0),
+        ]);
+        tri.add_obstacle(vec![
+            vec2(4.0, 4.0),
+            vec2(4.0, 6.0),
+            vec2(6.0, 6.0),
+            vec2(6.0, 4.0),
+        ]);
+        let mut mesh = tri.as_navmesh();
+        mesh.bake();
+        mesh
+    }
+
+    /// Helper: build a simple square mesh [0,10]x[0,10] without obstacles, bake it.
+    fn simple_mesh() -> Mesh {
+        let tri = Triangulation::from_outer_edges(&[
+            vec2(0.0, 0.0),
+            vec2(10.0, 0.0),
+            vec2(10.0, 10.0),
+            vec2(0.0, 10.0),
+        ]);
+        let mut mesh = tri.as_navmesh();
+        mesh.bake();
+        mesh
+    }
+
+    /// Helper: build a mesh with two disconnected islands (obstacle splits mesh vertically).
+    fn two_island_mesh() -> Mesh {
+        let mut tri = Triangulation::from_outer_edges(&[
+            vec2(0.0, 0.0),
+            vec2(10.0, 0.0),
+            vec2(10.0, 10.0),
+            vec2(0.0, 10.0),
+        ]);
+        tri.add_obstacle(vec![
+            vec2(4.0, 0.0),
+            vec2(6.0, 0.0),
+            vec2(6.0, 10.0),
+            vec2(4.0, 10.0),
+        ]);
+        let mut mesh = tri.as_navmesh();
+        mesh.bake();
+        mesh
+    }
+
+    // ---- calc_projected_and_clipped_pos_on_line_segment ----
+
+    #[test]
+    fn projection_midpoint() {
+        let result = calc_projected_and_clipped_pos_on_line_segment(
+            vec2(0.0, 0.0), vec2(10.0, 0.0), vec2(5.0, 3.0), EPSILON,
+        );
+        assert!((result - vec2(5.0, 0.0)).length() < 0.01);
+    }
+
+    #[test]
+    fn projection_clips_to_p1() {
+        let result = calc_projected_and_clipped_pos_on_line_segment(
+            vec2(0.0, 0.0), vec2(10.0, 0.0), vec2(-5.0, 3.0), EPSILON,
+        );
+        assert_eq!(result, vec2(0.0, 0.0));
+    }
+
+    #[test]
+    fn projection_clips_to_p2() {
+        let result = calc_projected_and_clipped_pos_on_line_segment(
+            vec2(0.0, 0.0), vec2(10.0, 0.0), vec2(15.0, 3.0), EPSILON,
+        );
+        assert_eq!(result, vec2(10.0, 0.0));
+    }
+
+    #[test]
+    fn projection_on_diagonal_line() {
+        let result = calc_projected_and_clipped_pos_on_line_segment(
+            vec2(0.0, 0.0), vec2(10.0, 10.0), vec2(0.0, 10.0), EPSILON,
+        );
+        assert!((result - vec2(5.0, 5.0)).length() < 0.1);
+    }
+
+    #[test]
+    fn projection_point_on_line() {
+        let result = calc_projected_and_clipped_pos_on_line_segment(
+            vec2(0.0, 0.0), vec2(10.0, 0.0), vec2(5.0, 0.0), EPSILON,
+        );
+        assert!((result - vec2(5.0, 0.0)).length() < 0.01);
+    }
+
+    // ---- get_island_id ----
+
+    #[test]
+    fn island_id_inside_mesh() {
+        let mesh = simple_mesh();
+        let aagu = MeshAagu { mesh: &mesh };
+        let id = aagu.get_island_id(vec2(5.0, 5.0));
+        assert!(id.is_some());
+    }
+
+    #[test]
+    fn island_id_outside_mesh() {
+        let mesh = simple_mesh();
+        let aagu = MeshAagu { mesh: &mesh };
+        let id = aagu.get_island_id(vec2(-5.0, -5.0));
+        assert!(id.is_none());
+    }
+
+    #[test]
+    fn island_id_two_islands_different() {
+        let mesh = two_island_mesh();
+        let aagu = MeshAagu { mesh: &mesh };
+        let left = aagu.get_island_id(vec2(1.0, 5.0));
+        let right = aagu.get_island_id(vec2(9.0, 5.0));
+        assert!(left.is_some());
+        assert!(right.is_some());
+        assert_ne!(left, right);
+    }
+
+    #[test]
+    fn island_id_in_obstacle_returns_none() {
+        let mesh = simple_mesh_with_obstacle();
+        let aagu = MeshAagu { mesh: &mesh };
+        let id = aagu.get_island_id(vec2(5.0, 5.0));
+        assert!(id.is_none());
+    }
+
+    // ---- approx_path: basic cases ----
+
+    #[test]
+    fn approx_path_same_point() {
+        let mesh = simple_mesh();
+        let aagu = MeshAagu { mesh: &mesh };
+        let result = aagu.approx_path(vec2(5.0, 5.0), vec2(5.0, 5.0), NavigationRequestSettings::default());
+        assert!(result.path.is_some());
+        assert!(result.status.status.is_valid_situation());
+    }
+
+    #[test]
+    fn approx_path_simple() {
+        let mesh = simple_mesh();
+        let aagu = MeshAagu { mesh: &mesh };
+        let result = aagu.approx_path(vec2(1.0, 1.0), vec2(9.0, 9.0), NavigationRequestSettings::default());
+        assert!(result.path.is_some());
+        matches!(result.status.status, NavigationResultStatus::PathFound);
+    }
+
+    #[test]
+    fn approx_path_around_obstacle() {
+        let mesh = simple_mesh_with_obstacle();
+        let aagu = MeshAagu { mesh: &mesh };
+        let result = aagu.approx_path(vec2(1.0, 5.0), vec2(9.0, 5.0), NavigationRequestSettings::default());
+        assert!(result.path.is_some());
+        let path = result.path.unwrap();
+        // Path should go around the obstacle, so length > straight line distance
+        assert!(path.length > vec2(1.0, 5.0).distance(vec2(9.0, 5.0)));
+    }
+
+    // ---- approx_path: PointCorrectionMode::NoCorrection ----
+
+    #[test]
+    fn approx_path_start_outside_no_correction() {
+        let mesh = simple_mesh();
+        let aagu = MeshAagu { mesh: &mesh };
+        let settings = NavigationRequestSettings {
+            start: PointCorrectionMode::NoCorrection,
+            ..Default::default()
+        };
+        let result = aagu.approx_path(vec2(-5.0, -5.0), vec2(5.0, 5.0), settings);
+        assert!(result.path.is_none());
+        matches!(result.status.status, NavigationResultStatus::OutsideMesh);
+    }
+
+    #[test]
+    fn approx_path_end_outside_no_correction() {
+        let mesh = simple_mesh();
+        let aagu = MeshAagu { mesh: &mesh };
+        let settings = NavigationRequestSettings {
+            end: PointCorrectionMode::NoCorrection,
+            ..Default::default()
+        };
+        let result = aagu.approx_path(vec2(5.0, 5.0), vec2(-5.0, -5.0), settings);
+        assert!(result.path.is_none());
+        matches!(result.status.status, NavigationResultStatus::OutsideMesh);
+    }
+
+    // ---- approx_path: PointCorrectionMode::ClosestPointInMesh ----
+
+    #[test]
+    fn approx_path_start_outside_closest_point_corrects() {
+        let mesh = simple_mesh();
+        let aagu = MeshAagu { mesh: &mesh };
+        let settings = NavigationRequestSettings {
+            start: PointCorrectionMode::ClosestPointInMesh(f32::INFINITY),
+            ..Default::default()
+        };
+        let result = aagu.approx_path(vec2(-1.0, 5.0), vec2(5.0, 5.0), settings);
+        assert!(result.path.is_some());
+        matches!(result.status.start, PointStatus::Modified { .. });
+    }
+
+    #[test]
+    fn approx_path_start_outside_closest_point_too_far() {
+        let mesh = simple_mesh();
+        let aagu = MeshAagu { mesh: &mesh };
+        let settings = NavigationRequestSettings {
+            start: PointCorrectionMode::ClosestPointInMesh(0.5),
+            ..Default::default()
+        };
+        let result = aagu.approx_path(vec2(-5.0, 5.0), vec2(5.0, 5.0), settings);
+        assert!(result.path.is_none());
+    }
+
+    #[test]
+    fn approx_path_closest_point_zero_dist_returns_none() {
+        let mesh = simple_mesh();
+        let aagu = MeshAagu { mesh: &mesh };
+        let settings = NavigationRequestSettings {
+            start: PointCorrectionMode::ClosestPointInMesh(0.0),
+            ..Default::default()
+        };
+        let result = aagu.approx_path(vec2(-1.0, 5.0), vec2(5.0, 5.0), settings);
+        assert!(result.path.is_none());
+    }
+
+    // ---- approx_path: PointCorrectionMode::ClosestMeshEdge ----
+
+    #[test]
+    fn approx_path_end_outside_closest_edge_corrects() {
+        let mesh = simple_mesh();
+        let aagu = MeshAagu { mesh: &mesh };
+        let settings = NavigationRequestSettings {
+            end: PointCorrectionMode::ClosestMeshEdge(f32::INFINITY),
+            ..Default::default()
+        };
+        let result = aagu.approx_path(vec2(5.0, 5.0), vec2(12.0, 5.0), settings);
+        assert!(result.path.is_some());
+        matches!(result.status.end, PointStatus::Modified { .. });
+    }
+
+    #[test]
+    fn approx_path_closest_edge_zero_dist_returns_none() {
+        let mesh = simple_mesh();
+        let aagu = MeshAagu { mesh: &mesh };
+        let settings = NavigationRequestSettings {
+            end: PointCorrectionMode::ClosestMeshEdge(0.0),
+            ..Default::default()
+        };
+        let result = aagu.approx_path(vec2(5.0, 5.0), vec2(12.0, 5.0), settings);
+        assert!(result.path.is_none());
+    }
+
+    // ---- approx_path: DifferentIslandMode ----
+
+    #[test]
+    fn approx_path_different_islands_no_path() {
+        let mesh = two_island_mesh();
+        let aagu = MeshAagu { mesh: &mesh };
+        let settings = NavigationRequestSettings {
+            islands: DifferentIslandMode::NoPath,
+            ..Default::default()
+        };
+        let result = aagu.approx_path(vec2(1.0, 5.0), vec2(9.0, 5.0), settings);
+        assert!(result.path.is_none());
+        matches!(result.status.status, NavigationResultStatus::DifferentIslands);
+    }
+
+    #[test]
+    fn approx_path_different_islands_closest_on_start_island() {
+        let mesh = two_island_mesh();
+        let aagu = MeshAagu { mesh: &mesh };
+        let settings = NavigationRequestSettings {
+            islands: DifferentIslandMode::ClosestOnStartIsland,
+            ..Default::default()
+        };
+        let result = aagu.approx_path(vec2(1.0, 5.0), vec2(9.0, 5.0), settings);
+        // Should find a path to the closest point on the start island
+        assert!(result.path.is_some());
+    }
+
+    #[test]
+    fn approx_path_same_island_works_with_no_path_mode() {
+        let mesh = two_island_mesh();
+        let aagu = MeshAagu { mesh: &mesh };
+        let settings = NavigationRequestSettings {
+            islands: DifferentIslandMode::NoPath,
+            ..Default::default()
+        };
+        // Both points on the left island
+        let result = aagu.approx_path(vec2(1.0, 1.0), vec2(1.0, 9.0), settings);
+        assert!(result.path.is_some());
+    }
+
+    // ---- approx_path: end outside mesh + different island mode ----
+
+    #[test]
+    fn approx_path_end_outside_different_island_no_path() {
+        let mesh = two_island_mesh();
+        let aagu = MeshAagu { mesh: &mesh };
+        let settings = NavigationRequestSettings {
+            islands: DifferentIslandMode::NoPath,
+            end: PointCorrectionMode::ClosestPointInMesh(f32::INFINITY),
+            ..Default::default()
+        };
+        // End point outside mesh, closest correction lands on right island
+        let result = aagu.approx_path(vec2(1.0, 5.0), vec2(12.0, 5.0), settings);
+        assert!(result.path.is_none());
+        matches!(result.status.status, NavigationResultStatus::DifferentIslands);
+    }
+
+    // ---- approx_path: same polygon shortcut ----
+
+    #[test]
+    fn approx_path_same_polygon_returns_direct_path() {
+        let mesh = simple_mesh();
+        let aagu = MeshAagu { mesh: &mesh };
+        // Two very close points likely in the same polygon
+        let result = aagu.approx_path(vec2(1.0, 1.0), vec2(1.1, 1.1), NavigationRequestSettings::default());
+        assert!(result.path.is_some());
+        let path = result.path.unwrap();
+        // Direct path, last point should be the destination
+        assert_eq!(*path.path.last().unwrap(), vec2(1.1, 1.1));
+    }
+
+    // ---- NavigationResultStatus::is_valid_situation ----
+
+    #[test]
+    fn result_status_validity() {
+        assert!(NavigationResultStatus::PathFound.is_valid_situation());
+        assert!(NavigationResultStatus::OutsideMesh.is_valid_situation());
+        assert!(NavigationResultStatus::DifferentIslands.is_valid_situation());
+        assert!(!NavigationResultStatus::BugInfinitePrevention.is_valid_situation());
+        assert!(!NavigationResultStatus::BugFloatingPointInaccuracies.is_valid_situation());
+    }
+
+    // ---- PathApproxResultStatus builder methods ----
+
+    #[test]
+    fn path_approx_result_status_builders() {
+        let status = PathApproxResultStatus::new(
+            PointStatus::Original(vec2(0.0, 0.0)),
+            PointStatus::Original(vec2(1.0, 1.0)),
+            NavigationResultStatus::PathFound,
+        );
+        let status = status.with_status(NavigationResultStatus::OutsideMesh);
+        matches!(status.status, NavigationResultStatus::OutsideMesh);
+
+        let status = status.with_start(PointStatus::Modified {
+            original: vec2(0.0, 0.0),
+            modified: vec2(0.1, 0.1),
+        });
+        matches!(status.start, PointStatus::Modified { .. });
+
+        let status = status.with_end(PointStatus::Modified {
+            original: vec2(1.0, 1.0),
+            modified: vec2(0.9, 0.9),
+        });
+        matches!(status.end, PointStatus::Modified { .. });
+    }
+
+    // ---- PointCorrectionMode / DifferentIslandMode defaults ----
+
+    #[test]
+    fn default_modes() {
+        let pcm = PointCorrectionMode::default();
+        matches!(pcm, PointCorrectionMode::ClosestPointInMesh(_));
+        let dim = DifferentIslandMode::default();
+        matches!(dim, DifferentIslandMode::ClosestOnStartIsland);
+    }
+
+    // ---- new_possibly_corrected_path ----
+
+    #[test]
+    fn new_corrected_path_includes_from_when_different() {
+        let path = new_possibly_corrected_path(vec2(1.0, 0.0), vec2(5.0, 0.0), vec2(0.0, 0.0));
+        assert_eq!(path.path.len(), 2);
+        assert_eq!(path.path[0], vec2(1.0, 0.0));
+        assert_eq!(path.path[1], vec2(5.0, 0.0));
+        assert!((path.length - (1.0 + 4.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn new_corrected_path_excludes_from_when_same() {
+        let path = new_possibly_corrected_path(vec2(1.0, 0.0), vec2(5.0, 0.0), vec2(1.0, 0.0));
+        assert_eq!(path.path.len(), 1);
+        assert_eq!(path.path[0], vec2(5.0, 0.0));
+        assert!((path.length - 4.0).abs() < 0.01);
+    }
 }
