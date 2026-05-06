@@ -41,7 +41,7 @@ mod input;
 mod instance;
 mod layers;
 mod merger;
-mod lib_aagu;
+pub mod lib_aagu;
 mod mesh_cleanup;
 mod primitives;
 mod stitching;
