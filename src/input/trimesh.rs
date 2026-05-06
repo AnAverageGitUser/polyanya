@@ -58,9 +58,9 @@ impl TryFrom<Trimesh> for Mesh {
 
         // Order vertex polygon neighbors counterclockwise
         for (vertex_index, vertex) in vertices.iter_mut().enumerate() {
-            vertex.polygons.sort_by(|index_a, index_b| {
-                let get_counterclockwise_edge = |index: isize| {
-                    // No -1 present yet, so the unwrap is safe
+            vertex.polygons.sort_unstable_by(|index_a, index_b| {
+                let get_counterclockwise_edge = |index: u32| {
+                    // No u32::MAX present yet, so the unwrap is safe
                     let index = usize::try_from(index).unwrap();
                     let neighbor_index = polygons[index]
                         .vertices
@@ -70,10 +70,25 @@ impl TryFrom<Trimesh> for Mesh {
                 };
                 let edge_a = get_counterclockwise_edge(*index_a);
                 let edge_b = get_counterclockwise_edge(*index_b);
-                if edge_a.perp_dot(edge_b) > 0. {
+                let perp = edge_a.perp_dot(edge_b);
+
+                // As of Rust 1.81, sort functions panic in debug mode if they are not provided with
+                // a total ordering. When edges are collinear, perp_dot(a, b) == 0, and in this case
+                // the edges should be considered equal. However, due to floating point precision
+                // errors, we can get situations where three collinear edges a, b, c have
+                //
+                //  a > b, b > c, and c > a
+                //
+                // but this violates the ordering invariant and causes a panic. To mitigate, we allow
+                // for some imprecision in perp_dot and treat these edges as collinear.
+                const EPSILON: f32 = 1e-6;
+
+                if perp > EPSILON {
                     Ordering::Less
-                } else {
+                } else if perp < -EPSILON {
                     Ordering::Greater
+                } else {
+                    Ordering::Equal
                 }
             });
 
@@ -91,11 +106,11 @@ impl TryFrom<Trimesh> for Mesh {
                 .chain(iter::once(polygons_including_obstacles[0]))
             {
                 let last_index = *polygons_including_obstacles.last().unwrap();
-                if last_index == -1 {
+                if last_index == u32::MAX {
                     polygons_including_obstacles.push(polygon_index);
                     continue;
                 }
-                let triangle_at = |index: isize| {
+                let triangle_at = |index: u32| {
                     let polygon = &polygons[usize::try_from(index).unwrap()];
                     &polygon.vertices
                 };
@@ -107,7 +122,7 @@ impl TryFrom<Trimesh> for Mesh {
 
                 if last_counterclockwise_neighbor != next_clockwise_neighbor {
                     // The edges don't align; there's an obstacle here
-                    polygons_including_obstacles.push(-1);
+                    polygons_including_obstacles.push(u32::MAX);
                 }
                 polygons_including_obstacles.push(polygon_index);
             }
@@ -139,7 +154,7 @@ fn to_vertices(trimesh: &Trimesh) -> Vec<Vertex> {
                         .contains(&vertex_index)
                         .then_some(polygon_index)
                 })
-                .map(|index| isize::try_from(index).unwrap())
+                .map(|index| index as u32)
                 .collect();
             Vertex::new(*coords, neighbor_indices)
         })
@@ -171,12 +186,12 @@ mod tests {
     fn generation_from_trimesh_is_same_as_regular() -> Result<(), MeshError> {
         let regular_mesh = Mesh::new(
             vec![
-                Vertex::new(Vec2::new(1., 1.), vec![0, 4, -1]), // 0
-                Vertex::new(Vec2::new(5., 1.), vec![-1, 1, 3, -1, 0]), // 1
-                Vertex::new(Vec2::new(5., 4.), vec![-1, 2, 1]), // 2
-                Vertex::new(Vec2::new(1., 4.), vec![-1, 4, -1, 3, 2]), // 3
-                Vertex::new(Vec2::new(2., 2.), vec![-1, 4, 0]), // 4
-                Vertex::new(Vec2::new(4., 3.), vec![1, 2, 3]),  // 5
+                Vertex::new(Vec2::new(1., 1.), vec![0, 4, u32::MAX]), // 0
+                Vertex::new(Vec2::new(5., 1.), vec![u32::MAX, 1, 3, u32::MAX, 0]), // 1
+                Vertex::new(Vec2::new(5., 4.), vec![u32::MAX, 2, 1]), // 2
+                Vertex::new(Vec2::new(1., 4.), vec![u32::MAX, 4, u32::MAX, 3, 2]), // 3
+                Vertex::new(Vec2::new(2., 2.), vec![u32::MAX, 4, 0]), // 4
+                Vertex::new(Vec2::new(4., 3.), vec![1, 2, 3]),        // 5
             ],
             vec![
                 Polygon::new(vec![0, 1, 4], false), // 0
@@ -198,39 +213,42 @@ mod tests {
             triangles: vec![[0, 1, 4], [1, 2, 5], [5, 2, 3], [1, 5, 3], [0, 4, 3]],
         }
         .try_into()?;
-        assert_eq!(regular_mesh.polygons, from_trimesh.polygons);
-        for (index, (expected_vertex, actual_vertex)) in regular_mesh
+        assert_eq!(
+            regular_mesh.layers[0].polygons,
+            from_trimesh.layers[0].polygons
+        );
+        for (index, (expected_vertex, actual_vertex)) in regular_mesh.layers[0]
             .vertices
             .iter()
-            .zip(from_trimesh.vertices.iter())
+            .zip(from_trimesh.layers[0].vertices.iter())
             .enumerate()
         {
             assert_eq!(
                 expected_vertex.coords, actual_vertex.coords,
                 "\nvertex {index} does not have the expected coords.\nExpected vertices: {0:?}\nGot vertices: {1:?}",
-                regular_mesh.vertices, from_trimesh.vertices
+                regular_mesh.layers[0].vertices, from_trimesh.layers[0].vertices
             );
 
             assert_eq!(
                 expected_vertex.is_corner, actual_vertex.is_corner,
                 "\nvertex {index} does not have the expected value for `is_corner`.\nExpected vertices: {0:?}\nGot vertices: {1:?}",
-                regular_mesh.vertices, from_trimesh.vertices
+                regular_mesh.layers[0].vertices, from_trimesh.layers[0].vertices
             );
-            let adjusted_actual = wrap_to_first(&actual_vertex.polygons, |index| *index != -1).unwrap_or_else(||
+            let adjusted_actual = wrap_to_first(&actual_vertex.polygons, |index| *index != u32::MAX).unwrap_or_else(||
                 panic!("vertex {index}: Found only surrounded by obstacles.\nExpected vertices: {0:?}\nGot vertices: {1:?}",
-                       regular_mesh.vertices, from_trimesh.vertices));
+                       regular_mesh.layers[0].vertices, from_trimesh.layers[0].vertices));
 
             let adjusted_expectation= wrap_to_first(&expected_vertex.polygons, |polygon| {
                 *polygon == adjusted_actual[0]
             })
                 .unwrap_or_else(||
                     panic!("vertex {index}: Failed to expected polygons.\nExpected vertices: {0:?}\nGot vertices: {1:?}",
-                           regular_mesh.vertices, from_trimesh.vertices));
+                           regular_mesh.layers[0].vertices, from_trimesh.layers[0].vertices));
 
             assert_eq!(
                 adjusted_expectation, adjusted_actual,
                 "\nvertex {index} does not have the expected polygons.\nExpected vertices: {0:?}\nGot vertices: {1:?}",
-                regular_mesh.vertices, from_trimesh.vertices
+                regular_mesh.layers[0].vertices, from_trimesh.layers[0].vertices
             );
         }
         Ok(())
@@ -246,7 +264,39 @@ mod tests {
         assert!(matches!(trimesh, Err(MeshError::InvalidMesh)));
     }
 
-    fn wrap_to_first(polygons: &[isize], pred: impl Fn(&isize) -> bool) -> Option<Vec<isize>> {
+    #[test]
+    fn collinear_edges_total_ordering() {
+        // This particular test case was found by fuzzing to look for the edge case
+        // where floating point errors cause total ordering to be violated.
+        let mut vertices = Vec::new();
+        for ray_index in 0..12 {
+            let angle = (ray_index as f32) * std::f32::consts::TAU / (12 as f32);
+            let angle_offset = ((7 as f32) * 0.1).sin() * 0.01;
+            let dir = Vec2::from_angle(angle + angle_offset);
+
+            for dist_index in 0..2 {
+                let dist = 1.0 + (dist_index as f32) * 0.5;
+                vertices.push(dir * dist);
+            }
+        }
+
+        let center_idx = vertices.len();
+        vertices.push(Vec2::ZERO);
+
+        let triangles: Vec<[usize; 3]> = (0..vertices.len() - 1)
+            .map(|i| [center_idx, i, (i + 1) % (vertices.len() - 1)])
+            .collect();
+
+        let result: Result<Mesh, _> = Trimesh {
+            vertices,
+            triangles,
+        }
+        .try_into();
+
+        assert!(result.is_ok());
+    }
+
+    fn wrap_to_first(polygons: &[u32], pred: impl Fn(&u32) -> bool) -> Option<Vec<u32>> {
         let offset = polygons.iter().position(pred)?;
         Some(
             polygons

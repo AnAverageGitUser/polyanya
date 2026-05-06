@@ -35,10 +35,10 @@ fn is_in_mesh_overlapping_simplified_2() {
         vec2(7.5, 7.5),
         vec2(7.5, 4.0),
     ]);
-    let polygons_before = triangulation.as_navmesh().polygons;
+    let polygons_before = triangulation.as_navmesh().layers[0].polygons.clone();
     triangulation.simplify(1.0);
     let mesh: Mesh = triangulation.as_navmesh();
-    assert!(dbg!(polygons_before.len()) >= dbg!(mesh.polygons.len()));
+    assert!(dbg!(polygons_before.len()) >= dbg!(mesh.layers[0].polygons.len()));
     for i in 0..10 {
         for j in 0..10 {
             if i > 2 && i < 8 && j > 2 && j < 8 {
@@ -83,10 +83,10 @@ fn is_in_mesh_merge_overlapping_of_inner_bounds_can_shrink_the_outer_bounds() {
         vec2(7.5, 10.),
         vec2(2.5, 10.),
     ]);
-    let polygons_before = triangulation.as_navmesh().polygons;
+    let polygons_before = triangulation.as_navmesh().layers[0].polygons.clone();
     triangulation.simplify(1.0);
     let mesh: Mesh = triangulation.as_navmesh();
-    assert!(dbg!(polygons_before.len()) >= dbg!(mesh.polygons.len()));
+    assert!(dbg!(polygons_before.len()) >= dbg!(mesh.layers[0].polygons.len()));
     for i in 0..=10 {
         for j in 0..=10 {
             if i > 2 && i < 8 && j > 2 && j < 8 {

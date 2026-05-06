@@ -1,7 +1,8 @@
+use std::collections::HashSet;
 use std::iter;
 use glam::{Vec2, vec2};
 use log::error;
-use crate::instance::{InstanceStep, SearchInstance};
+use crate::instance::{InstanceStep, SearchInstance, U32Layer};
 use crate::{Mesh, Path};
 
 #[cfg(feature = "tracing")]
@@ -216,18 +217,24 @@ fn new_possibly_corrected_path(from: Vec2, to: Vec2, from_orig: Vec2) -> Path {
     if from != from_orig {
         Path {
             length: from_orig.distance(from) + from.distance(to),
-            path: vec![from, to]
+            path: vec![from, to],
+            #[cfg(feature = "detailed-layers")]
+            path_with_layers: vec![],
+            path_through_polygons: vec![],
         }
     }
     else {
         Path {
             length: from.distance(to),
-            path: vec![to]
+            path: vec![to],
+            #[cfg(feature = "detailed-layers")]
+            path_with_layers: vec![],
+            path_through_polygons: vec![],
         }
     }
 }
 
-/// A navigation mesh
+/// A navigation mesh wrapper providing approximate pathfinding with point correction
 #[derive(Debug, Clone)]
 pub struct MeshAagu<'m> {
     pub(crate) mesh: &'m Mesh,
@@ -284,8 +291,9 @@ impl<'m> MeshAagu<'m> {
         }
         debug_assert_ne!(starting_polygon_idx, u32::MAX);
 
-        let islands = self.mesh.islands.as_ref().expect("island baking is a prerequisite");
-        let starting_island = islands[starting_polygon_idx as usize];
+        let layer = &self.mesh.layers[starting_polygon_idx.layer() as usize];
+        let islands = layer.islands.as_ref().expect("island baking is a prerequisite");
+        let starting_island = islands[starting_polygon_idx.polygon() as usize];
 
         match settings.islands {
             DifferentIslandMode::NoPath => {
@@ -300,7 +308,9 @@ impl<'m> MeshAagu<'m> {
                     if to != to_orig {
                         status = status.with_end(PointStatus::Modified { original: to_orig, modified: to })
                     }
-                    if starting_island != islands[ending_polygon_idx as usize] {
+                    let end_layer = &self.mesh.layers[ending_polygon_idx.layer() as usize];
+                    let end_islands = end_layer.islands.as_ref().expect("island baking is a prerequisite");
+                    if starting_island != end_islands[ending_polygon_idx.polygon() as usize] {
                         // in this case, the corrected target point got snapped to its closest island
                         // but the island was different to the start island
                         return PathApproxResult {
@@ -310,7 +320,9 @@ impl<'m> MeshAagu<'m> {
                     }
                 }
                 else {
-                    if islands[ending_polygon_idx as usize] != starting_island {
+                    let end_layer = &self.mesh.layers[ending_polygon_idx.layer() as usize];
+                    let end_islands = end_layer.islands.as_ref().expect("island baking is a prerequisite");
+                    if end_islands[ending_polygon_idx.polygon() as usize] != starting_island {
                         return PathApproxResult {
                             path: None,
                             status: status.with_status(NavigationResultStatus::DifferentIslands),
@@ -319,7 +331,14 @@ impl<'m> MeshAagu<'m> {
                 }
             }
             DifferentIslandMode::ClosestOnStartIsland => {
-                if ending_polygon_idx == u32::MAX || islands[ending_polygon_idx as usize] != starting_island {
+                let needs_fix = if ending_polygon_idx == u32::MAX {
+                    true
+                } else {
+                    let end_layer = &self.mesh.layers[ending_polygon_idx.layer() as usize];
+                    let end_islands = end_layer.islands.as_ref().expect("island baking is a prerequisite");
+                    end_islands[ending_polygon_idx.polygon() as usize] != starting_island
+                };
+                if needs_fix {
                     let same_island_as_start = |poly_idx: usize| {
                         islands[poly_idx] == starting_island
                     };
@@ -359,17 +378,20 @@ impl<'m> MeshAagu<'m> {
             }
         }
 
+        let total_polygons: usize = self.mesh.layers.iter().map(|l| l.polygons.len()).sum();
+
         let mut search_instance = SearchInstance::setup(
             self.mesh,
             (from, starting_polygon_idx),
             (to, ending_polygon_idx),
+            HashSet::new(),
             #[cfg(feature = "stats")]
             start,
         );
 
         // Limit search to avoid an infinite loop.
-        for _ in 0..self.mesh.polygons.len() * 1000 {
-            match search_instance.next(false) {
+        for _ in 0..total_polygons * 1000 {
+            match search_instance.next() {
                 InstanceStep::Found(path) => {
                     return PathApproxResult { path: Some(path), status: status.with_status(NavigationResultStatus::PathFound) };
                 },
@@ -401,13 +423,13 @@ impl<'m> MeshAagu<'m> {
                 if *max_dist == 0.0 {
                     return Err(NavigationResultStatus::OutsideMesh);
                 }
-                self.closest_exterior_point(outside_mesh_point, *max_dist, polygon_filter)
+                self.closest_exterior_point(outside_mesh_point, *max_dist, &polygon_filter)
             }
             PointCorrectionMode::ClosestMeshEdge(max_dist) => {
                 if *max_dist == 0.0 {
                     return Err(NavigationResultStatus::OutsideMesh);
                 }
-                self.closest_exterior_point_line_edge(outside_mesh_point, *max_dist, polygon_filter)
+                self.closest_exterior_point_line_edge(outside_mesh_point, *max_dist, &polygon_filter)
             }
         };
 
@@ -434,10 +456,11 @@ impl<'m> MeshAagu<'m> {
                 return Some(point);
             }
         }
-        let concave_polygon = &self.mesh.polygons[polygon_idx as usize];
+        let layer = &self.mesh.layers[polygon_idx.layer() as usize];
+        let concave_polygon = &layer.polygons[polygon_idx.polygon() as usize];
         let concave_poly_center = concave_polygon.vertices
             .iter()
-            .map(|idx| self.mesh.vertices[*idx as usize].coords)
+            .map(|idx| layer.vertices[*idx as usize].coords)
             .sum::<Vec2>()
             / (concave_polygon.vertices.len() as f32);
         {
@@ -485,25 +508,27 @@ impl<'m> MeshAagu<'m> {
         let max_dist_sq = max_dist * max_dist;
         let mut closest = None;
         let mut distance_squared = max_dist_sq;
-        for (poly_idx, poly) in self.mesh.polygons.iter().enumerate() {
-            if !polygon_filter(poly_idx) {
-                // do not consider this polygon because of the filter predicate
-                continue;
-            }
+        for (layer_idx, layer) in self.mesh.layers.iter().enumerate() {
+            for (poly_idx, poly) in layer.polygons.iter().enumerate() {
+                if !polygon_filter(poly_idx) {
+                    // do not consider this polygon because of the filter predicate
+                    continue;
+                }
 
-            let iter_1 = poly.vertices.iter();
-            let mut iter_2 = poly.vertices.iter();
-            iter_2.next();
-            for (p1i, p2i) in iter_1.zip(iter_2.chain(iter::once(poly.vertices.first().expect("polygon must not be empty"))))
-                .map(|(a, b)| (*a as usize, *b as usize))
-            {
-                let p1 = self.mesh.vertices[p1i].coords;
-                let p2 = self.mesh.vertices[p2i].coords;
-                let on_line_segment = calc_projected_and_clipped_pos_on_line_segment(p1, p2, point_outside_mesh, EPSILON);
-                let dist_sq = on_line_segment.distance_squared(point_outside_mesh);
-                if dist_sq <= distance_squared { // use "<=" to overwrite possible "None" element
-                    distance_squared = dist_sq;
-                    closest = Some((on_line_segment, poly_idx as u32, max_dist_sq));
+                let iter_1 = poly.vertices.iter();
+                let mut iter_2 = poly.vertices.iter();
+                iter_2.next();
+                for (p1i, p2i) in iter_1.zip(iter_2.chain(iter::once(poly.vertices.first().expect("polygon must not be empty"))))
+                    .map(|(a, b)| (*a as usize, *b as usize))
+                {
+                    let p1 = layer.vertices[p1i].coords;
+                    let p2 = layer.vertices[p2i].coords;
+                    let on_line_segment = calc_projected_and_clipped_pos_on_line_segment(p1, p2, point_outside_mesh, EPSILON);
+                    let dist_sq = on_line_segment.distance_squared(point_outside_mesh);
+                    if dist_sq <= distance_squared { // use "<=" to overwrite possible "None" element
+                        distance_squared = dist_sq;
+                        closest = Some((on_line_segment, u32::from_layer_and_polygon(layer_idx as u8, poly_idx as u32), max_dist_sq));
+                    }
                 }
             }
         }
@@ -516,25 +541,27 @@ impl<'m> MeshAagu<'m> {
         let max_dist_sq = max_dist * max_dist;
         let mut closest = None;
         let mut distance_squared = max_dist_sq;
-        for (poly_idx, poly) in self.mesh.polygons.iter().enumerate() {
-            if !polygon_filter(poly_idx) {
-                // do not consider this polygon because of the filter predicate
-                continue;
-            }
-
-            for vertex_idx in poly.vertices.iter() {
-                let p1 = self.mesh.vertices[*vertex_idx as usize].coords;
-                let p1_dist_sq = p1.distance_squared(point_outside_mesh);
-                if p1_dist_sq <= distance_squared { // use "<=" to overwrite possible "None" element
-                    distance_squared = p1_dist_sq;
-                    closest = Some((p1, poly_idx as u32, max_dist_sq));
+        for (layer_idx, layer) in self.mesh.layers.iter().enumerate() {
+            for (poly_idx, poly) in layer.polygons.iter().enumerate() {
+                if !polygon_filter(poly_idx) {
+                    // do not consider this polygon because of the filter predicate
+                    continue;
                 }
 
-                let p2 = self.mesh.vertices[*vertex_idx as usize].coords;
-                let p2_dist_sq = p2.distance_squared(point_outside_mesh);
-                if p2_dist_sq <= distance_squared { // use "<=" to overwrite possible "None" element
-                    distance_squared = p2_dist_sq;
-                    closest = Some((p2, poly_idx as u32, max_dist_sq));
+                for vertex_idx in poly.vertices.iter() {
+                    let p1 = layer.vertices[*vertex_idx as usize].coords;
+                    let p1_dist_sq = p1.distance_squared(point_outside_mesh);
+                    if p1_dist_sq <= distance_squared { // use "<=" to overwrite possible "None" element
+                        distance_squared = p1_dist_sq;
+                        closest = Some((p1, u32::from_layer_and_polygon(layer_idx as u8, poly_idx as u32), max_dist_sq));
+                    }
+
+                    let p2 = layer.vertices[*vertex_idx as usize].coords;
+                    let p2_dist_sq = p2.distance_squared(point_outside_mesh);
+                    if p2_dist_sq <= distance_squared { // use "<=" to overwrite possible "None" element
+                        distance_squared = p2_dist_sq;
+                        closest = Some((p2, u32::from_layer_and_polygon(layer_idx as u8, poly_idx as u32), max_dist_sq));
+                    }
                 }
             }
         }
@@ -544,12 +571,18 @@ impl<'m> MeshAagu<'m> {
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
     #[inline(always)]
     fn get_point_location_ignore_delta(&self, point: Vec2) -> u32 {
-        if self.mesh.baked_polygons.is_none() {
-            self.mesh.get_point_location_unit(point)
+        // Search across all layers, return the first match
+        for (layer_idx, layer) in self.mesh.layers.iter().enumerate() {
+            let result = if layer.baked_polygons.is_none() {
+                layer.get_point_locations_unit(point).next()
+            } else {
+                layer.get_point_locations_unit_baked(&point).next()
+            };
+            if let Some(poly_idx) = result {
+                return u32::from_layer_and_polygon(layer_idx as u8, poly_idx);
+            }
         }
-        else {
-            self.mesh.get_point_location_unit_baked(point)
-        }
+        u32::MAX
     }
 }
 

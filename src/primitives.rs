@@ -1,7 +1,5 @@
 use std::ops::RangeInclusive;
 
-use geo::{Area, Coord};
-use smallvec::SmallVec;
 #[cfg(feature = "tracing")]
 use tracing::instrument;
 
@@ -10,7 +8,7 @@ use glam::Vec2;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-use crate::Mesh;
+use crate::{instance::EdgeSide, layers::Layer, Vec2Helper};
 
 /// A point that lies on an edge of a polygon in the navigation mesh.
 #[derive(Debug, Clone, PartialEq)]
@@ -20,17 +18,18 @@ pub struct Vertex {
     pub coords: Vec2,
     /// Indices of the neighbouring polygons, in a counter clockwise order.
     ///
-    /// `-1` marks a neighbouring spot outside the navigation mesh.
-    pub polygons: Vec<isize>,
-    pub(crate) is_corner: bool,
+    /// `u32::MAX` marks a neighbouring spot outside the navigation mesh.
+    pub polygons: Vec<u32>,
+    /// Is this vertex a corner of one of its polygons?
+    pub is_corner: bool,
 }
 
 impl Vertex {
     /// Create a new `Vertex`.
-    pub fn new(coords: Vec2, polygons: Vec<isize>) -> Self {
+    pub fn new(coords: Vec2, polygons: Vec<u32>) -> Self {
         Self {
             coords,
-            is_corner: polygons.contains(&-1),
+            is_corner: polygons.contains(&u32::MAX),
             polygons,
         }
     }
@@ -91,19 +90,18 @@ impl Polygon {
 
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
     #[inline(always)]
-    pub(crate) fn edges_index(&self) -> SmallVec<[(u32, u32); 10]> {
-        let mut edges = SmallVec::with_capacity(self.vertices.len());
-        let mut last = self.vertices[0];
-        for vertex in self.vertices.iter().skip(1) {
-            edges.push((last, *vertex));
-            last = *vertex;
-        }
-        edges.push((last, self.vertices[0]));
-        edges
+    pub(crate) fn edges_index(&self) -> impl Iterator<Item = [u32; 2]> + '_ {
+        self.vertices
+            .windows(2)
+            .map(|pair| [pair[0], pair[1]])
+            .chain(std::iter::once([
+                self.vertices[self.vertices.len() - 1],
+                self.vertices[0],
+            ]))
     }
 
     #[cfg(test)]
-    pub(crate) fn double_edges_index(&self) -> SmallVec<[(u32, u32); 20]> {
+    pub(crate) fn double_edges_index(&self) -> smallvec::SmallVec<[(u32, u32); 20]> {
         use smallvec::smallvec;
         let mut edges = smallvec![(u32::MAX, u32::MAX); self.vertices.len() * 2];
         let mut last = self.vertices[0];
@@ -122,50 +120,46 @@ impl Polygon {
     pub(crate) fn circular_edges_index(
         &self,
         bounds: RangeInclusive<usize>,
-    ) -> SmallVec<[(u32, u32); 10]> {
-        let mut edges = SmallVec::with_capacity(self.vertices.len());
-        if *bounds.start() < self.vertices.len() {
-            let mut last = self.vertices[*bounds.start() % self.vertices.len()];
-            for vertex in self.vertices.iter().skip(1 + bounds.start()) {
-                edges.push((last, *vertex));
-                last = *vertex;
-            }
-            edges.push((last, self.vertices[0]));
-        }
-        if *bounds.end() + 1 > self.vertices.len() {
-            let start = bounds.start().saturating_sub(self.vertices.len());
-            let mut last = self.vertices[0.max(start)];
-            for vertex in self.vertices.iter().skip(0.max(start) + 1).take(
-                bounds
-                    .end()
-                    .saturating_sub(self.vertices.len().max(*bounds.start())),
-            ) {
-                edges.push((last, *vertex));
-                last = *vertex;
-            }
-            edges.push((
-                last,
-                self.vertices[(*bounds.end() + 1) % self.vertices.len()],
-            ));
-        }
-
-        edges
+    ) -> impl Iterator<Item = [u32; 2]> + '_ {
+        self.edges_index()
+            .chain(self.edges_index())
+            .skip(*bounds.start())
+            .take(*bounds.end() + 1 - *bounds.start())
     }
 
-    pub(crate) fn area(&self, mesh: &Mesh) -> f32 {
-        geo::Polygon::new(
-            geo::LineString(
-                self.vertices
-                    .iter()
-                    .map(|v| {
-                        let c = mesh.vertices[*v as usize].coords;
-                        Coord::from((c.x, c.y))
-                    })
-                    .collect(),
-            ),
-            vec![],
-        )
-        .unsigned_area()
+    pub(crate) fn area(&self, mesh: &Layer) -> f32 {
+        let shift = mesh.vertices[self.vertices[0] as usize].coords;
+
+        let mut area = 0.0;
+        for (start, end) in self.edges_index().map(|[e0, e1]| {
+            (
+                mesh.vertices[e0 as usize].coords - shift,
+                mesh.vertices[e1 as usize].coords - shift,
+            )
+        }) {
+            area += start.x * end.y - start.y * end.x;
+        }
+        area / 2.0
+    }
+
+    pub(crate) fn contains(&self, mesh: &Layer, point: Vec2) -> bool {
+        if self.edges_index().any(|[edge0, edge1]| {
+            point.side((
+                mesh.vertices[edge0 as usize].coords,
+                mesh.vertices[edge1 as usize].coords,
+            )) == EdgeSide::Right
+        }) {
+            return false;
+        }
+
+        true
+    }
+
+    pub(crate) fn coords(&self, mesh: &Layer) -> Vec<Vec2> {
+        self.vertices
+            .iter()
+            .map(|v| mesh.vertices[*v as usize].coords)
+            .collect()
     }
 }
 
@@ -185,7 +179,10 @@ mod tests {
                 eprintln!("{start} -> {end}");
                 assert_eq!(
                     polygon.double_edges_index()[start..=end],
-                    polygon.circular_edges_index(start..=end)[..]
+                    polygon
+                        .circular_edges_index(start..=end)
+                        .map(|[a, b]| (a, b))
+                        .collect::<Vec<_>>()
                 );
             }
         }

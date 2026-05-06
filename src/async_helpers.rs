@@ -1,11 +1,11 @@
 #[cfg(feature = "stats")]
 use std::time::Instant;
-use std::{fmt, future::Future, task::Poll};
+use std::{collections::HashSet, fmt, future::Future, task::Poll};
 
 use glam::Vec2;
 
 use crate::{
-    instance::{InstanceStep, SearchInstance},
+    instance::{InstanceStep, SearchInstance, U32Layer},
     Mesh, Path,
 };
 
@@ -17,10 +17,10 @@ pub struct FuturePath<'m> {
     pub(crate) to: Vec2,
     pub(crate) mesh: &'m Mesh,
     pub(crate) instance: Option<SearchInstance<'m>>,
-    pub(crate) ending_polygon: isize,
+    pub(crate) ending_polygon: u32,
 }
 
-impl<'m> fmt::Debug for FuturePath<'m> {
+impl fmt::Debug for FuturePath<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FuturePath")
             .field("from", &self.from)
@@ -29,7 +29,7 @@ impl<'m> fmt::Debug for FuturePath<'m> {
     }
 }
 
-impl<'m> Future for FuturePath<'m> {
+impl Future for FuturePath<'_> {
     type Output = Option<Path>;
 
     fn poll(
@@ -38,7 +38,7 @@ impl<'m> Future for FuturePath<'m> {
     ) -> Poll<Self::Output> {
         if let Some(search_instance) = self.instance.as_mut() {
             for _i in 0..3 {
-                match search_instance.next(true) {
+                match search_instance.next() {
                     InstanceStep::Found(path) => return Poll::Ready(Some(path)),
                     InstanceStep::NotFound => return Poll::Ready(None),
                     InstanceStep::Continue => {}
@@ -58,11 +58,17 @@ impl<'m> Future for FuturePath<'m> {
             if ending_polygon == u32::MAX {
                 return Poll::Ready(None);
             }
-            if let Some(islands) = self.mesh.islands.as_ref() {
-                let start_island = islands.get(starting_polygon_index as usize);
-                let end_island = islands.get(ending_polygon as usize);
-                if start_island.is_some() && end_island.is_some() && start_island != end_island {
-                    return Poll::Ready(None);
+            if starting_polygon_index.layer() == ending_polygon.layer() {
+                if let Some(islands) = self.mesh.layers[starting_polygon_index.layer() as usize]
+                    .islands
+                    .as_ref()
+                {
+                    let start_island = islands.get(starting_polygon_index as usize);
+                    let end_island = islands.get(ending_polygon as usize);
+                    if start_island.is_some() && end_island.is_some() && start_island != end_island
+                    {
+                        return Poll::Ready(None);
+                    }
                 }
             }
 
@@ -85,6 +91,10 @@ impl<'m> Future for FuturePath<'m> {
                 return Poll::Ready(Some(Path {
                     length: self.from.distance(self.to),
                     path: vec![self.to],
+                    #[cfg(feature = "detailed-layers")]
+                    #[cfg_attr(docsrs, doc(cfg(feature = "detailed-layers")))]
+                    path_with_layers: vec![(self.to, ending_polygon.layer())],
+                    path_through_polygons: vec![ending_polygon],
                 }));
             }
 
@@ -92,10 +102,11 @@ impl<'m> Future for FuturePath<'m> {
                 self.mesh,
                 (self.from, starting_polygon_index),
                 (self.to, ending_polygon),
+                HashSet::default(),
                 #[cfg(feature = "stats")]
                 start,
             ));
-            self.ending_polygon = ending_polygon as isize;
+            self.ending_polygon = ending_polygon;
             cx.waker().wake_by_ref();
             Poll::Pending
         }
