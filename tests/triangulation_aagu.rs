@@ -1,8 +1,6 @@
+use std::assert_matches;
 use glam::vec2;
-use polyanya::{
-    DifferentIslandMode, Mesh, MeshAagu, NavigationRequestSettings, NavigationResultStatus,
-    PointCorrectionMode, PointStatus, Triangulation,
-};
+use polyanya::{DifferentIslandMode, Mesh, MeshAagu, NavigationRequestSettings, NavigationResultStatus, PointCorrectionMode, PointStatus, Triangulation};
 use std::fs;
 use std::str::FromStr;
 
@@ -329,7 +327,7 @@ fn approx_path_start_outside_corrected() {
     };
     let result = aagu.approx_path(vec2(-2.0, 10.0), vec2(18.0, 10.0), settings);
     assert!(result.path.is_some());
-    assert!(matches!(result.status.start, PointStatus::Modified { .. }));
+    assert_matches!(result.status.start, PointStatus::Modified { .. });
 }
 
 #[test]
@@ -342,7 +340,7 @@ fn approx_path_end_outside_corrected_closest_point() {
     };
     let result = aagu.approx_path(vec2(2.0, 10.0), vec2(25.0, 10.0), settings);
     assert!(result.path.is_some());
-    assert!(matches!(result.status.end, PointStatus::Modified { .. }));
+    assert_matches!(result.status.end, PointStatus::Modified { .. });
 }
 
 #[test]
@@ -355,7 +353,7 @@ fn approx_path_end_outside_corrected_closest_edge() {
     };
     let result = aagu.approx_path(vec2(2.0, 10.0), vec2(25.0, 10.0), settings);
     assert!(result.path.is_some());
-    assert!(matches!(result.status.end, PointStatus::Modified { .. }));
+    assert_matches!(result.status.end, PointStatus::Modified { .. });
 }
 
 #[test]
@@ -368,10 +366,10 @@ fn approx_path_no_correction_start_outside_fails() {
     };
     let result = aagu.approx_path(vec2(-2.0, 10.0), vec2(18.0, 10.0), settings);
     assert!(result.path.is_none());
-    assert!(matches!(
+    assert_matches!(
         result.status.status,
         NavigationResultStatus::OutsideMesh
-    ));
+    );
 }
 
 #[test]
@@ -384,10 +382,10 @@ fn approx_path_different_islands_no_path_mode() {
     };
     let result = aagu.approx_path(vec2(2.0, 10.0), vec2(18.0, 10.0), settings);
     assert!(result.path.is_none());
-    assert!(matches!(
+    assert_matches!(
         result.status.status,
         NavigationResultStatus::DifferentIslands
-    ));
+    );
 }
 
 #[test]
@@ -453,7 +451,7 @@ fn approx_path_end_in_obstacle_corrected() {
     };
     let result = aagu.approx_path(vec2(2.0, 10.0), vec2(10.0, 10.0), settings);
     assert!(result.path.is_some());
-    assert!(matches!(result.status.end, PointStatus::Modified { .. }));
+    assert_matches!(result.status.end, PointStatus::Modified { .. });
 }
 
 #[test]
@@ -467,6 +465,6 @@ fn approx_path_both_outside_corrected() {
     };
     let result = aagu.approx_path(vec2(-2.0, 10.0), vec2(25.0, 10.0), settings);
     assert!(result.path.is_some());
-    assert!(matches!(result.status.start, PointStatus::Modified { .. }));
-    assert!(matches!(result.status.end, PointStatus::Modified { .. }));
+    assert_matches!(result.status.start, PointStatus::Modified { .. });
+    assert_matches!(result.status.end, PointStatus::Modified { .. });
 }

@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::iter;
-use glam::{Vec2, vec2};
+use glam::Vec2;
 use log::error;
 use crate::instance::{InstanceStep, SearchInstance, U32Layer};
 use crate::{Mesh, Path};
@@ -55,7 +55,7 @@ impl Default for PointCorrectionMode {
 }
 /// The mode given to the navigation algorithm to determine which kind of behaviour we expect when the
 /// (possibly corrected) start point or (possibly corrected) end point are on different islands.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Default)]
 pub enum DifferentIslandMode {
     /// If the (possibly corrected) start point and the (possibly corrected) end point are on different islands,
     /// return no path.
@@ -65,12 +65,8 @@ pub enum DifferentIslandMode {
     /// adheres to the end points [`PointCorrectionMode`].
     ///
     /// If not such end point can be found, return no path.
+    #[default]
     ClosestOnStartIsland,
-}
-impl Default for DifferentIslandMode {
-    fn default() -> Self {
-        DifferentIslandMode::ClosestOnStartIsland
-    }
 }
 /// The settings for the navigation algorithm.
 /// Certain situation can be configured to be handled differently.
@@ -383,8 +379,6 @@ impl<'m> MeshAagu<'m> {
             }
         }
 
-        let total_polygons: usize = self.mesh.layers.iter().map(|l| l.polygons.len()).sum();
-
         let mut search_instance = SearchInstance::setup(
             self.mesh,
             (from, starting_polygon_idx),
@@ -395,6 +389,7 @@ impl<'m> MeshAagu<'m> {
         );
 
         // Limit search to avoid an infinite loop.
+        let total_polygons: usize = self.mesh.layers.iter().map(|l| l.polygons.len()).sum();
         for _ in 0..total_polygons * 1000 {
             match search_instance.next() {
                 InstanceStep::Found(path) => {
@@ -428,13 +423,13 @@ impl<'m> MeshAagu<'m> {
                 if *max_dist == 0.0 {
                     return Err(NavigationResultStatus::OutsideMesh);
                 }
-                self.closest_exterior_point(outside_mesh_point, *max_dist, &polygon_filter)
+                self.find_closest_point_on_edge(outside_mesh_point, *max_dist, &polygon_filter)
             }
             PointCorrectionMode::ClosestMeshEdge(max_dist) => {
                 if *max_dist == 0.0 {
                     return Err(NavigationResultStatus::OutsideMesh);
                 }
-                self.closest_exterior_point_line_edge(outside_mesh_point, *max_dist, &polygon_filter)
+                self.find_closest_mesh_vertex(outside_mesh_point, *max_dist, &polygon_filter)
             }
         };
 
@@ -507,9 +502,11 @@ impl<'m> MeshAagu<'m> {
         Some(concave_poly_center)
     }
 
-    /// Returns the closest point in the mesh to the given point that is outside the mesh.
+    /// Returns the closest point (with a tolerance of `EPSILON`) in the mesh to the given point.
+    /// Should only be called when the given point is outside the mesh, as this iterates over every polygon and is more of a last resort fallback.
+    /// If the point is inside the mesh, the `SearchInstance` should be used instead.
     #[inline(always)]
-    fn closest_exterior_point(&self, point_outside_mesh: Vec2, max_dist: f32, polygon_filter: impl Fn(usize) -> bool) -> Option<(Vec2, u32, f32)> {
+    fn find_closest_point_on_edge(&self, point_outside_mesh: Vec2, max_dist: f32, polygon_filter: impl Fn(usize) -> bool) -> Option<(Vec2, u32, f32)> {
         let max_dist_sq = max_dist * max_dist;
         let mut closest = None;
         let mut distance_squared = max_dist_sq;
@@ -520,10 +517,14 @@ impl<'m> MeshAagu<'m> {
                     continue;
                 }
 
-                let iter_1 = poly.vertices.iter();
-                let mut iter_2 = poly.vertices.iter();
-                iter_2.next();
-                for (p1i, p2i) in iter_1.zip(iter_2.chain(iter::once(poly.vertices.first().expect("polygon must not be empty"))))
+                for (p1i, p2i) in poly.vertices.iter()
+                    .zip(
+                        poly.vertices.iter()
+                            .skip(1)
+                            .chain(
+                                iter::once(poly.vertices.first().expect("polygon must not be empty"))
+                            )
+                    )
                     .map(|(a, b)| (*a as usize, *b as usize))
                 {
                     let p1 = layer.vertices[p1i].coords;
@@ -540,9 +541,11 @@ impl<'m> MeshAagu<'m> {
         closest
     }
 
-    /// Returns the closest point in the mesh to the given point that is outside the mesh.
+    /// Returns the closest vertex of the mesh to the given point.
+    /// Should only be called when the given point is outside the mesh, as this iterates over every polygon and is more of a last resort fallback.
+    /// If the point is inside the mesh, the `SearchInstance` should be used instead.
     #[inline(always)]
-    fn closest_exterior_point_line_edge(&self, point_outside_mesh: Vec2, max_dist: f32, polygon_filter: impl Fn(usize) -> bool) -> Option<(Vec2, u32, f32)> {
+    fn find_closest_mesh_vertex(&self, point_outside_mesh: Vec2, max_dist: f32, polygon_filter: impl Fn(usize) -> bool) -> Option<(Vec2, u32, f32)> {
         let max_dist_sq = max_dist * max_dist;
         let mut closest = None;
         let mut distance_squared = max_dist_sq;
@@ -554,18 +557,11 @@ impl<'m> MeshAagu<'m> {
                 }
 
                 for vertex_idx in poly.vertices.iter() {
-                    let p1 = layer.vertices[*vertex_idx as usize].coords;
-                    let p1_dist_sq = p1.distance_squared(point_outside_mesh);
-                    if p1_dist_sq <= distance_squared { // use "<=" to overwrite possible "None" element
-                        distance_squared = p1_dist_sq;
-                        closest = Some((p1, u32::from_layer_and_polygon(layer_idx as u8, poly_idx as u32), max_dist_sq));
-                    }
-
-                    let p2 = layer.vertices[*vertex_idx as usize].coords;
-                    let p2_dist_sq = p2.distance_squared(point_outside_mesh);
-                    if p2_dist_sq <= distance_squared { // use "<=" to overwrite possible "None" element
-                        distance_squared = p2_dist_sq;
-                        closest = Some((p2, u32::from_layer_and_polygon(layer_idx as u8, poly_idx as u32), max_dist_sq));
+                    let p = layer.vertices[*vertex_idx as usize].coords;
+                    let dist_sq = p.distance_squared(point_outside_mesh);
+                    if dist_sq <= distance_squared { // use "<=" to overwrite possible "None" element
+                        distance_squared = dist_sq;
+                        closest = Some((p, u32::from_layer_and_polygon(layer_idx as u8, poly_idx as u32), max_dist_sq));
                     }
                 }
             }
@@ -601,36 +597,38 @@ impl<'m> MeshAagu<'m> {
 fn calc_projected_and_clipped_pos_on_line_segment(p1: Vec2, p2: Vec2, to_be_projected_pt: Vec2, epsilon: f32) -> Vec2 {
     debug_assert!(epsilon > 0.0);
 
-    let p1_to_p2 = vec2(p2.x - p1.x, p2.y - p1.y);
-    let line_segment_dot = p1_to_p2.dot(p1_to_p2);
+    let p1_to_p2 = p2 - p1;
+    // len_squared is used both for clipping bounds and for the projection formula,
+    // removing the redundant `line_segment_dot` that was identical to `len_squared`.
+    let len_squared = p1_to_p2.dot(p1_to_p2);
 
-    let p1_to_pr = vec2(to_be_projected_pt.x - p1.x, to_be_projected_pt.y - p1.y);
+    let p1_to_pr = to_be_projected_pt - p1;
     let projection_dot = p1_to_p2.dot(p1_to_pr);
 
-    if projection_dot <= 0.0 + epsilon {
+    if projection_dot <= epsilon {
         p1
     }
-    else if projection_dot >= line_segment_dot - epsilon {
+    else if projection_dot >= len_squared - epsilon {
         p2
     }
     else {
-        let len_squared = p1_to_p2.x * p1_to_p2.x + p1_to_p2.y * p1_to_p2.y;
         p1 + (projection_dot * p1_to_p2) / len_squared
     }
 }
 /// Calculates the projection of the given point onto the given line.
 #[inline(always)]
 fn _project_point_onto_line(p1: Vec2, p2: Vec2, to_be_projected_pt: Vec2) -> Vec2 {
-    let p1_to_p2 = vec2(p2.x - p1.x, p2.y - p1.y);
-    let p1_to_pr = vec2(to_be_projected_pt.x - p1.x, to_be_projected_pt.y - p1.y);
+    let p1_to_p2 = p2 - p1;
+    let p1_to_pr = to_be_projected_pt - p1;
     let projection_dot = p1_to_p2.dot(p1_to_pr);
-    let len_squared = p1_to_p2.x * p1_to_p2.x + p1_to_p2.y * p1_to_p2.y;
+    let len_squared = p1_to_p2.dot(p1_to_p2);
     p1 + (projection_dot * p1_to_p2) / len_squared
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
     use crate::{Mesh, Triangulation};
     use glam::vec2;
 
@@ -781,7 +779,7 @@ mod tests {
         let aagu = MeshAagu { mesh: &mesh };
         let result = aagu.approx_path(vec2(1.0, 1.0), vec2(9.0, 9.0), NavigationRequestSettings::default());
         assert!(result.path.is_some());
-        matches!(result.status.status, NavigationResultStatus::PathFound);
+        assert_matches!(result.status.status, NavigationResultStatus::PathFound);
     }
 
     #[test]
@@ -807,7 +805,7 @@ mod tests {
         };
         let result = aagu.approx_path(vec2(-5.0, -5.0), vec2(5.0, 5.0), settings);
         assert!(result.path.is_none());
-        matches!(result.status.status, NavigationResultStatus::OutsideMesh);
+        assert_matches!(result.status.status, NavigationResultStatus::OutsideMesh);
     }
 
     #[test]
@@ -820,7 +818,7 @@ mod tests {
         };
         let result = aagu.approx_path(vec2(5.0, 5.0), vec2(-5.0, -5.0), settings);
         assert!(result.path.is_none());
-        matches!(result.status.status, NavigationResultStatus::OutsideMesh);
+        assert_matches!(result.status.status, NavigationResultStatus::OutsideMesh);
     }
 
     // ---- approx_path: PointCorrectionMode::ClosestPointInMesh ----
@@ -835,7 +833,7 @@ mod tests {
         };
         let result = aagu.approx_path(vec2(-1.0, 5.0), vec2(5.0, 5.0), settings);
         assert!(result.path.is_some());
-        matches!(result.status.start, PointStatus::Modified { .. });
+        assert_matches!(result.status.start, PointStatus::Modified { .. });
     }
 
     #[test]
@@ -874,7 +872,7 @@ mod tests {
         };
         let result = aagu.approx_path(vec2(5.0, 5.0), vec2(12.0, 5.0), settings);
         assert!(result.path.is_some());
-        matches!(result.status.end, PointStatus::Modified { .. });
+        assert_matches!(result.status.end, PointStatus::Modified { .. });
     }
 
     #[test]
@@ -901,7 +899,7 @@ mod tests {
         };
         let result = aagu.approx_path(vec2(1.0, 5.0), vec2(9.0, 5.0), settings);
         assert!(result.path.is_none());
-        matches!(result.status.status, NavigationResultStatus::DifferentIslands);
+        assert_matches!(result.status.status, NavigationResultStatus::DifferentIslands);
     }
 
     #[test]
@@ -944,7 +942,7 @@ mod tests {
         // End point outside mesh, closest correction lands on right island
         let result = aagu.approx_path(vec2(1.0, 5.0), vec2(12.0, 5.0), settings);
         assert!(result.path.is_none());
-        matches!(result.status.status, NavigationResultStatus::DifferentIslands);
+        assert_matches!(result.status.status, NavigationResultStatus::DifferentIslands);
     }
 
     // ---- approx_path: same polygon shortcut ----
@@ -982,19 +980,19 @@ mod tests {
             NavigationResultStatus::PathFound,
         );
         let status = status.with_status(NavigationResultStatus::OutsideMesh);
-        matches!(status.status, NavigationResultStatus::OutsideMesh);
+        assert_matches!(status.status, NavigationResultStatus::OutsideMesh);
 
         let status = status.with_start(PointStatus::Modified {
             original: vec2(0.0, 0.0),
             modified: vec2(0.1, 0.1),
         });
-        matches!(status.start, PointStatus::Modified { .. });
+        assert_matches!(status.start, PointStatus::Modified { .. });
 
         let status = status.with_end(PointStatus::Modified {
             original: vec2(1.0, 1.0),
             modified: vec2(0.9, 0.9),
         });
-        matches!(status.end, PointStatus::Modified { .. });
+        assert_matches!(status.end, PointStatus::Modified { .. });
     }
 
     // ---- PointCorrectionMode / DifferentIslandMode defaults ----
@@ -1002,9 +1000,9 @@ mod tests {
     #[test]
     fn default_modes() {
         let pcm = PointCorrectionMode::default();
-        matches!(pcm, PointCorrectionMode::ClosestPointInMesh(_));
+        assert_matches!(pcm, PointCorrectionMode::ClosestPointInMesh(_));
         let dim = DifferentIslandMode::default();
-        matches!(dim, DifferentIslandMode::ClosestOnStartIsland);
+        assert_matches!(dim, DifferentIslandMode::ClosestOnStartIsland);
     }
 
     // ---- new_possibly_corrected_path ----
