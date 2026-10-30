@@ -11,7 +11,7 @@ jobs:
     name: Run benchmarks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -22,8 +22,29 @@ jobs:
         run: cargo codspeed build
 
       - name: Run the benchmarks
-        uses: CodSpeedHQ/action@v4
+        uses: CodSpeedHQ/action@v5
         with:
           mode: instrumentation
           run: cargo codspeed run
+          token: ${{ secrets.CODSPEED_TOKEN }}
+
+  benchmarks-detailed-layers:
+    name: Run benchmarks (detailed-layers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install CodSpeed
+        run: cargo install cargo-codspeed
+
+      - name: Build the benchmark target(s)
+        run: cargo codspeed build --features detailed-layers,recast --bench path --bench no_path --bench layers
+
+      - name: Run the benchmarks
+        uses: CodSpeedHQ/action@v5
+        with:
+          mode: instrumentation
+          run: cargo codspeed run --bench path --bench no_path --bench layers
           token: ${{ secrets.CODSPEED_TOKEN }}

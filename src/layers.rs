@@ -3,11 +3,16 @@ use tracing::instrument;
 
 use glam::{vec2, Vec2};
 use rstar::RTree;
+use smallvec::SmallVec;
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-use crate::{helpers::Vec2Helper, instance::EdgeSide, BoundedPolygon, MeshError, Polygon, Vertex};
+use crate::{
+    helpers::Vec2Helper,
+    instance::{EdgeSide, U32Layer},
+    BoundedPolygon, MeshError, Polygon, Vertex,
+};
 
 /// Layer of a NavMesh
 #[derive(Debug, Clone)]
@@ -25,8 +30,8 @@ pub struct Layer {
     pub scale: Vec2,
     pub(crate) baked_polygons: Option<RTree<BoundedPolygon>>,
     pub(crate) islands: Option<Vec<usize>>,
-    /// Height of each vertex. Must either have zero elements to ignore heights, or the same length as vertices.
-    pub height: Vec<f32>,
+    /// Height of each vertex on the Y axis. Either empty, or the same length as `vertices`.
+    pub(crate) height: Vec<f32>,
 }
 
 impl Default for Layer {
@@ -45,6 +50,32 @@ impl Default for Layer {
 }
 
 impl Layer {
+    /// Height of each vertex on the Y axis, in the same order as [`Self::vertices`], or `None`
+    /// if this layer doesn't have height information.
+    ///
+    /// Meshes built from a [`Triangulation`](crate::Triangulation) are flat and never have any;
+    /// meshes imported from recast get theirs from the detail mesh.
+    #[inline]
+    pub fn heights(&self) -> Option<&[f32]> {
+        (!self.height.is_empty()).then_some(self.height.as_slice())
+    }
+
+    /// Set the height of each vertex on the Y axis, in the same order as [`Self::vertices`].
+    ///
+    /// There must be exactly one height per vertex, otherwise this returns
+    /// [`MeshError::MismatchedHeights`] and the layer is left untouched. Passing an empty `Vec`
+    /// drops the height information.
+    pub fn set_heights(&mut self, heights: Vec<f32>) -> Result<(), MeshError> {
+        if !heights.is_empty() && heights.len() != self.vertices.len() {
+            return Err(MeshError::MismatchedHeights {
+                heights: heights.len(),
+                vertices: self.vertices.len(),
+            });
+        }
+        self.height = heights;
+        Ok(())
+    }
+
     /// Remove pre-computed optimizations from the mesh. Call this if you modified the [`Mesh`].
     #[inline]
     pub fn unbake(&mut self) {
@@ -106,8 +137,15 @@ impl Layer {
     /// Uses a BVH. This is useful at the start of the pathfinding, to get the containing polygons
     /// for the start and end point. It can also be used through [`Self::point_in_mesh`] to check
     /// if a point is in the mesh.
+    ///
+    /// A layer without polygons is left unbaked: there is no tree to build, and every reader of
+    /// the BVH already falls back to the linear scan when it is missing.
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
     pub fn bake_polygon_finder(&mut self) {
+        if self.polygons.is_empty() {
+            self.baked_polygons = None;
+            return;
+        }
         let bounded_polygons = self
             .polygons
             .iter()
@@ -180,7 +218,7 @@ impl Layer {
         self.baked_polygons
             .as_ref()
             .unwrap()
-            .locate_in_envelope_intersecting(&rstar::AABB::from_point(query_point))
+            .locate_in_envelope_intersecting(rstar::AABB::from_point(query_point))
             .filter_map(|bp| {
                 self.point_in_polygon(*point, &self.polygons[bp.index])
                     .then_some(bp.index as u32)
@@ -198,7 +236,7 @@ impl Layer {
             .baked_polygons
             .as_ref()
             .unwrap()
-            .locate_in_envelope_intersecting_int(&rstar::AABB::from_point(query_point), |bp| {
+            .locate_in_envelope_intersecting_int(rstar::AABB::from_point(query_point), |bp| {
                 if self.point_in_polygon(*point, &self.polygons[bp.index]) {
                     result = Some(bp.index as u32);
                     ControlFlow::Break(())
@@ -228,8 +266,11 @@ impl Layer {
             };
 
             let current_side = point.side((last, next));
-            if current_side == EdgeSide::Edge && point.in_bounding_box((last, next)) {
-                return true;
+            if current_side == EdgeSide::Edge {
+                if point.in_bounding_box((last, next)) {
+                    return true;
+                }
+                continue;
             }
             if current_side != EdgeSide::Left {
                 return false;
@@ -345,6 +386,61 @@ impl Layer {
         None
     }
 
+    /// Push every polygon of this layer that the point lands in, tagged with the layer
+    /// index.
+    ///
+    /// Same walk as [`Self::get_closest_points_inner`], without building the intermediate
+    /// `Vec` per layer and per step: a query over overlapping layers does this once per
+    /// layer, and only the polygon indices are ever used.
+    #[inline(always)]
+    pub(crate) fn push_point_locations(
+        &self,
+        point: Vec2,
+        delta: f32,
+        step: u32,
+        layer_index: u8,
+        found: &mut SmallVec<[u32; 1]>,
+    ) {
+        // A mesh can carry layers holding nothing -- a chunk entirely covered by an obstacle,
+        // or a recast area id that nothing was tagged with. Point location visits every layer
+        // on every query, so it is worth one load not to walk into the rest of this.
+        if self.polygons.is_empty() {
+            return;
+        }
+        let sample = 10;
+        for i in 0..=(sample * step) {
+            let angle = i as f32 * std::f32::consts::TAU / (sample * (step + 1)) as f32;
+            let (x, y) = angle.sin_cos();
+            let new_point = point + vec2(x, y) * delta * step as f32;
+            let before = found.len();
+            if let Some(baked_polygons) = self.baked_polygons.as_ref() {
+                // Internal iteration: the lazy `locate_in_envelope_intersecting` costs
+                // noticeably more per hit, and this runs once per layer per query.
+                let query_point = [new_point.x, new_point.y];
+                let _ = baked_polygons.locate_in_envelope_intersecting_int(
+                    rstar::AABB::from_point(query_point),
+                    |bp| {
+                        if self.point_in_polygon(new_point, &self.polygons[bp.index]) {
+                            found.push(U32Layer::from_layer_and_polygon(
+                                layer_index,
+                                bp.index as u32,
+                            ));
+                        }
+                        core::ops::ControlFlow::<()>::Continue(())
+                    },
+                );
+            } else {
+                found.extend(
+                    self.get_point_locations_unit(new_point)
+                        .map(|polygon| U32Layer::from_layer_and_polygon(layer_index, polygon)),
+                );
+            }
+            if found.len() != before {
+                return;
+            }
+        }
+    }
+
     #[inline(always)]
     pub(crate) fn get_closest_points_inner(
         &self,
@@ -402,6 +498,9 @@ impl Layer {
         direction: Vec2,
         step: u32,
     ) -> Option<(Vec2, u32)> {
+        if self.polygons.is_empty() {
+            return None;
+        }
         let point = point + direction * delta * step as f32;
         let poly = if self.baked_polygons.is_none() {
             self.get_point_locations_unit(point).next()
@@ -648,6 +747,34 @@ mod tests {
             .collect()
     }
 
+    /// Compare a path against where its points are meant to be, rather than against the
+    /// exact `f32` that came out last time.
+    ///
+    /// The points where a path crosses between layers are computed, not copied off a
+    /// vertex, so the last few bits of them move whenever the arithmetic reaching them
+    /// changes. Writing those bits into the test pins noise: it fails for changes that move
+    /// a crossing by a millionth of a unit and says nothing about it landing in the right
+    /// place.
+    #[cfg(feature = "detailed-layers")]
+    #[track_caller]
+    fn assert_path_with_layers(actual: &[(Vec2, u8)], expected: &[(Vec2, u8)]) {
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "expected {expected:?}, got {actual:?}"
+        );
+        for ((point, layer), (expected_point, expected_layer)) in actual.iter().zip(expected) {
+            assert_eq!(
+                layer, expected_layer,
+                "expected {expected:?}, got {actual:?}"
+            );
+            assert!(
+                point.distance(*expected_point) < 1.0e-4,
+                "expected {expected:?}, got {actual:?}"
+            );
+        }
+    }
+
     #[test]
     fn shortcut_blocked() {
         let mesh = mesh_overlapping_layers();
@@ -733,9 +860,9 @@ mod tests {
                 7 => {
                     assert_eq!(path.path, vec![vec2(1.0, 2.0), to]);
                     #[cfg(feature = "detailed-layers")]
-                    assert_eq!(
-                        path.path_with_layers,
-                        vec![(vec2(1.0, 2.0), 1), (vec2(4.0, 1.0), 0), (to, 0)]
+                    assert_path_with_layers(
+                        &path.path_with_layers,
+                        &[(vec2(1.0, 2.0), 1), (vec2(4.0, 1.0), 0), (to, 0)],
                     );
                 }
                 _ if i < 11 => {
@@ -770,9 +897,9 @@ mod tests {
                 7 => {
                     assert_eq!(path.path, vec![vec2(4.0, 1.0), to]);
                     #[cfg(feature = "detailed-layers")]
-                    assert_eq!(
-                        path.path_with_layers,
-                        vec![(vec2(4.0, 1.0), 1), (vec2(0.9999997, 2.0), 0), (to, 0)]
+                    assert_path_with_layers(
+                        &path.path_with_layers,
+                        &[(vec2(4.0, 1.0), 1), (vec2(1.0, 2.0), 0), (to, 0)],
                     );
                 }
                 _ if i < 11 => {
