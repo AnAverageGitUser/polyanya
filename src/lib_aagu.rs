@@ -381,8 +381,8 @@ impl<'m> MeshAagu<'m> {
 
         let mut search_instance = SearchInstance::setup(
             self.mesh,
-            (from, starting_polygon_idx),
-            (to, ending_polygon_idx),
+            (from, &[starting_polygon_idx]),
+            (to, &[ending_polygon_idx]),
             HashSet::new(),
             #[cfg(feature = "stats")]
             start,
