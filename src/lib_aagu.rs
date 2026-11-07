@@ -366,6 +366,17 @@ impl<'m> MeshAagu<'m> {
         Some(upstream::polygon_id(layer_idx, island as u32))
     }
 
+    /// Whether two polygons (ids) are on the same island. Islands are per layer: polygons on different layers count as
+    /// different islands. Without baked islands nothing is known, so they count as the same (the search decides).
+    fn same_island(&self, a: u32, b: u32) -> bool {
+        let (layer_a, layer_b) = (upstream::layer_of(a), upstream::layer_of(b));
+        let islands = |layer: u8| upstream::islands(&self.mesh.layers[layer as usize]);
+        match (islands(layer_a), islands(layer_b)) {
+            (Some(ia), Some(ib)) => layer_a == layer_b && ia[upstream::polygon_of(a) as usize] == ib[upstream::polygon_of(b) as usize],
+            _ => true,
+        }
+    }
+
     /// Compute a path between two points.
     /// This method is blocking.
     /// - If the starting point and the end point are within the mesh:
@@ -405,10 +416,6 @@ impl<'m> MeshAagu<'m> {
         }
         debug_assert_ne!(starting_polygon_idx, u32::MAX);
 
-        let layer = &self.mesh.layers[upstream::layer_of(starting_polygon_idx) as usize];
-        let islands = upstream::islands(layer).expect("island baking is a prerequisite");
-        let starting_island = islands[upstream::polygon_of(starting_polygon_idx) as usize];
-
         match settings.islands {
             DifferentIslandMode::NoPath => {
                 if ending_polygon_idx == u32::MAX {
@@ -422,9 +429,7 @@ impl<'m> MeshAagu<'m> {
                     if to != to_orig {
                         status = status.with_end(PointStatus::Modified { original: to_orig, modified: to })
                     }
-                    let end_layer = &self.mesh.layers[upstream::layer_of(ending_polygon_idx) as usize];
-                    let end_islands = upstream::islands(end_layer).expect("island baking is a prerequisite");
-                    if starting_island != end_islands[upstream::polygon_of(ending_polygon_idx) as usize] {
+                    if !self.same_island(starting_polygon_idx, ending_polygon_idx) {
                         // in this case, the corrected target point got snapped to its closest island
                         // but the island was different to the start island
                         return PathApproxResult {
@@ -434,9 +439,7 @@ impl<'m> MeshAagu<'m> {
                     }
                 }
                 else {
-                    let end_layer = &self.mesh.layers[upstream::layer_of(ending_polygon_idx) as usize];
-                    let end_islands = upstream::islands(end_layer).expect("island baking is a prerequisite");
-                    if end_islands[upstream::polygon_of(ending_polygon_idx) as usize] != starting_island {
+                    if !self.same_island(starting_polygon_idx, ending_polygon_idx) {
                         return PathApproxResult {
                             path: None,
                             status: status.with_status(NavigationResultStatus::DifferentIslands),
@@ -445,17 +448,9 @@ impl<'m> MeshAagu<'m> {
                 }
             }
             DifferentIslandMode::ClosestOnStartIsland => {
-                let needs_fix = if ending_polygon_idx == u32::MAX {
-                    true
-                } else {
-                    let end_layer = &self.mesh.layers[upstream::layer_of(ending_polygon_idx) as usize];
-                    let end_islands = upstream::islands(end_layer).expect("island baking is a prerequisite");
-                    end_islands[upstream::polygon_of(ending_polygon_idx) as usize] != starting_island
-                };
+                let needs_fix = ending_polygon_idx == u32::MAX || !self.same_island(starting_polygon_idx, ending_polygon_idx);
                 if needs_fix {
-                    let same_island_as_start = |poly_idx: usize| {
-                        islands[poly_idx] == starting_island
-                    };
+                    let same_island_as_start = |polygon_id: u32| self.same_island(starting_polygon_idx, polygon_id);
                     match self.fix_outside_mesh_point(&settings.end, to, same_island_as_start) {
                         Ok(res) => { (to, ending_polygon_idx) = res; }
                         Err(nav_res_status) => {
@@ -520,7 +515,7 @@ impl<'m> MeshAagu<'m> {
         &self,
         mode: &PointCorrectionMode,
         outside_mesh_point: Vec2,
-        polygon_filter: impl Fn(usize) -> bool,
+        polygon_filter: impl Fn(u32) -> bool,
     )
         -> Result<(Vec2, u32), NavigationResultStatus>
     {
@@ -571,7 +566,8 @@ impl<'m> MeshAagu<'m> {
             .iter()
             .map(|idx| layer.vertices[*idx as usize].coords)
             .sum::<Vec2>()
-            / (concave_polygon.vertices.len() as f32);
+            / (concave_polygon.vertices.len() as f32)
+            + layer.offset;
         {
             let polygon_idx_test = self.get_point_location_ignore_delta(concave_poly_center);
             if polygon_idx_test == u32::MAX {
@@ -615,14 +611,14 @@ impl<'m> MeshAagu<'m> {
     /// `max_dist` of `point`, as (point, polygon id, `max_dist²`). For points outside the mesh (a fallback, not for
     /// points inside it).
     #[inline(always)]
-    fn find_closest_point_on_edge(&self, point: Vec2, max_dist: f32, polygon_filter: impl Fn(usize) -> bool) -> Option<(Vec2, u32, f32)> {
+    fn find_closest_point_on_edge(&self, point: Vec2, max_dist: f32, polygon_filter: impl Fn(u32) -> bool) -> Option<(Vec2, u32, f32)> {
         self.find_closest(point, max_dist, polygon_filter, closest_edge_point_of_polygon, true)
     }
 
     /// The closest polygon vertex within `max_dist` of `point`, as (vertex, polygon id, `max_dist²`). For points outside
     /// the mesh.
     #[inline(always)]
-    fn find_closest_mesh_vertex(&self, point: Vec2, max_dist: f32, polygon_filter: impl Fn(usize) -> bool) -> Option<(Vec2, u32, f32)> {
+    fn find_closest_mesh_vertex(&self, point: Vec2, max_dist: f32, polygon_filter: impl Fn(u32) -> bool) -> Option<(Vec2, u32, f32)> {
         self.find_closest(point, max_dist, polygon_filter, closest_vertex_of_polygon, true)
     }
 
@@ -637,21 +633,23 @@ impl<'m> MeshAagu<'m> {
         &self,
         point: Vec2,
         max_dist: f32,
-        polygon_filter: impl Fn(usize) -> bool,
+        polygon_filter: impl Fn(u32) -> bool,
         in_polygon: InPolygon,
         use_index: bool,
     ) -> Option<(Vec2, u32, f32)> {
         let max_dist_sq = max_dist * max_dist;
         let mut best: Option<(Vec2, u32, f32)> = None; // (point, polygon id, squared distance)
         let consider = |layer_idx: usize, layer: &Layer, poly_idx: usize, best: &mut Option<(Vec2, u32, f32)>| {
-            if !polygon_filter(poly_idx) {
+            let id = upstream::polygon_id(layer_idx as u8, poly_idx as u32);
+            if !polygon_filter(id) {
                 return;
             }
-            let Some((p, dist_sq)) = in_polygon(layer, &layer.polygons[poly_idx], point) else { return };
+            // in layer coordinates (an offset keeps distances), the result back in mesh coordinates
+            let Some((p, dist_sq)) = in_polygon(layer, &layer.polygons[poly_idx], point - layer.offset) else { return };
             if dist_sq > max_dist_sq {
                 return;
             }
-            let id = upstream::polygon_id(layer_idx as u8, poly_idx as u32);
+            let p = p + layer.offset;
             let better = match best {
                 None => true,
                 Some((_, best_id, best_dist_sq)) => dist_sq < *best_dist_sq || (dist_sq == *best_dist_sq && id > *best_id),
@@ -669,7 +667,8 @@ impl<'m> MeshAagu<'m> {
                 continue;
             };
             if max_dist.is_finite() {
-                let candidates = upstream::polygons_in_box(layer, point - Vec2::splat(max_dist), point + Vec2::splat(max_dist))
+                let local = point - layer.offset;
+                let candidates = upstream::polygons_in_box(layer, local - Vec2::splat(max_dist), local + Vec2::splat(max_dist))
                     .expect("baked: the layer has bounds");
                 for poly_idx in candidates {
                     consider(layer_idx, layer, poly_idx, &mut best);
@@ -680,7 +679,8 @@ impl<'m> MeshAagu<'m> {
             // the box is farther), or the box covers the whole layer
             let mut half = 1.0f32;
             loop {
-                let (min, max) = (point - Vec2::splat(half), point + Vec2::splat(half));
+                let local = point - layer.offset;
+                let (min, max) = (local - Vec2::splat(half), local + Vec2::splat(half));
                 let mut layer_best: Option<(Vec2, u32, f32)> = None;
                 for poly_idx in upstream::polygons_in_box(layer, min, max).expect("baked: the layer has bounds") {
                     consider(layer_idx, layer, poly_idx, &mut layer_best);
@@ -711,7 +711,7 @@ impl<'m> MeshAagu<'m> {
     fn get_point_location_ignore_delta(&self, point: Vec2) -> u32 {
         // Search across all layers, return the first match
         for (layer_idx, layer) in self.mesh.layers.iter().enumerate() {
-            if let Some(poly_idx) = upstream::locate_in_layer(layer, point) {
+            if let Some(poly_idx) = upstream::locate_in_layer(layer, point - layer.offset) {
                 return upstream::polygon_id(layer_idx as u8, poly_idx);
             }
         }
@@ -883,7 +883,7 @@ mod tests {
             let p = if rnd() < 0.2 { p.round() } else { p };
             for in_polygon in modes {
                 for max_dist in [0.5, 2.0, 7.0, f32::INFINITY] {
-                    for filter in [|_: usize| true, |i: usize| !i.is_multiple_of(3)] {
+                    for filter in [|_: u32| true, |i: u32| !i.is_multiple_of(3)] {
                         let scan = aagu.find_closest(p, max_dist, filter, in_polygon, false);
                         let indexed = aagu.find_closest(p, max_dist, filter, in_polygon, true);
                         assert_eq!(scan, indexed, "point {p}, max_dist {max_dist}");

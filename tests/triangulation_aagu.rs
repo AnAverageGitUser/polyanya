@@ -546,3 +546,65 @@ fn closest_mesh_edge_snaps_to_the_edge_closest_mesh_vertex_to_a_corner() {
     assert!(vertex.distance(from) > 3.0, "a corner, far from the start: {vertex}");
     assert!(vertex.x <= 4.0 + 0.01 || vertex.y >= 8.0 - 0.01, "a corner outside the wall: {vertex}");
 }
+
+fn square_triangulation() -> Triangulation {
+    Triangulation::from_outer_edges(&[vec2(0.0, 0.0), vec2(10.0, 0.0), vec2(10.0, 10.0), vec2(0.0, 10.0)])
+}
+
+/// Points are in mesh coordinates: a layer's offset is taken into account (as `Mesh::point_in_mesh` does).
+#[test]
+fn approx_path_respects_the_layer_offset() {
+    let mut tri = square_triangulation();
+    tri.add_obstacle(vec![vec2(4.0, 0.0), vec2(6.0, 0.0), vec2(6.0, 8.0), vec2(4.0, 8.0)]);
+    let mut mesh = tri.as_navmesh();
+    mesh.layers[0].offset = vec2(100.0, 0.0);
+    mesh.bake();
+    let aagu = MeshAagu::new(&mesh);
+    let (from, to) = (vec2(101.0, 1.0), vec2(109.0, 1.0));
+    assert!(mesh.point_in_mesh(from) && mesh.point_in_mesh(to));
+    let result = aagu.approx_path(from, to, NavigationRequestSettings::default());
+    assert_matches!(result.status.start, PointStatus::Original(_));
+    assert_matches!(result.status.end, PointStatus::Original(_));
+    let path = result.path.expect("path around the wall");
+    assert_eq!(*path.path.last().unwrap(), to);
+    assert!(path.path.len() >= 3, "around the wall: {:?}", path.path);
+    assert!(aagu.get_island_id(from).is_some());
+    // a point in the wall is corrected to the wall's border, in mesh coordinates
+    let result = aagu.approx_path(from, vec2(104.5, 4.0), NavigationRequestSettings::default());
+    let PointStatus::Modified { modified, .. } = result.status.end else { panic!("{:?}", result.status) };
+    assert!(modified.distance(vec2(104.0, 4.0)) < 0.01, "{modified}");
+}
+
+/// An unbaked mesh (no islands, no polygon finder) gives a result instead of panicking.
+#[test]
+fn approx_path_on_an_unbaked_mesh() {
+    let mut tri = square_triangulation();
+    tri.add_obstacle(vec![vec2(4.0, 0.0), vec2(6.0, 0.0), vec2(6.0, 8.0), vec2(4.0, 8.0)]);
+    let mesh = tri.as_navmesh(); // not baked
+    let aagu = MeshAagu::new(&mesh);
+    let result = aagu.approx_path(vec2(1.0, 1.0), vec2(9.0, 1.0), NavigationRequestSettings::default());
+    assert!(result.path.is_some(), "{:?}", result.status);
+    let result = aagu.approx_path(vec2(1.0, 1.0), vec2(4.5, 4.0), NavigationRequestSettings::default());
+    assert!(result.path.is_some(), "end in the wall is corrected: {:?}", result.status);
+}
+
+/// Islands are per layer: a point on another layer than the start counts as another island.
+#[test]
+fn approx_path_islands_on_two_layers() {
+    let mut mesh = square_triangulation().as_navmesh();
+    let mut other = square_triangulation().as_layer();
+    other.offset = vec2(20.0, 0.0);
+    mesh.layers.push(other);
+    mesh.bake();
+    let aagu = MeshAagu::new(&mesh);
+    let (from, to) = (vec2(5.0, 5.0), vec2(25.0, 5.0));
+    assert!(mesh.point_in_mesh(to));
+    let settings = |islands| NavigationRequestSettings { islands, ..Default::default() };
+    let result = aagu.approx_path(from, to, settings(DifferentIslandMode::NoPath));
+    assert!(result.path.is_none());
+    assert_matches!(result.status.status, NavigationResultStatus::DifferentIslands);
+    let result = aagu.approx_path(from, to, settings(DifferentIslandMode::ClosestOnStartIsland));
+    let PointStatus::Modified { modified, .. } = result.status.end else { panic!("{:?}", result.status) };
+    assert!(modified.distance(vec2(10.0, 5.0)) < 0.01, "on the start's layer: {modified}");
+    assert!(result.path.is_some());
+}
