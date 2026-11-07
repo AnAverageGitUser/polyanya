@@ -70,6 +70,10 @@ mod upstream {
         Some(layer.baked_polygons.as_ref()?.locate_in_envelope_intersecting(envelope).map(|bp| bp.index))
     }
 
+    /// The index of the next stats line of `mesh` (the counter prints the CSV header before the first one).
+    #[cfg(feature = "stats")]
+    pub(super) fn next_stats_scenario(mesh: &Mesh) -> u32 { mesh.scenarios.next() }
+
     /// A path that was not produced by a search (no polygon or layer details).
     pub(super) fn new_path(length: f32, path: Vec<Vec2>) -> Path {
         Path {
@@ -469,18 +473,12 @@ impl<'m> MeshAagu<'m> {
         if starting_polygon_idx == ending_polygon_idx {
             #[cfg(feature = "stats")]
             {
-                if self.mesh.scenarios.get() == 0 {
-                    eprintln!(
-                        "index;micros;successor_calls;generated;pushed;popped;pruned_post_pop;length",
-                    );
-                }
                 eprintln!(
                     "{};{};0;0;0;0;0;{}",
-                    self.mesh.scenarios.get(),
+                    upstream::next_stats_scenario(self.mesh),
                     start.elapsed().as_secs_f32() * 1_000_000.0,
                     from.distance(to),
                 );
-                self.mesh.scenarios.set(self.mesh.scenarios.get() + 1);
             }
             return PathApproxResult {
                 path: Some(new_possibly_corrected_path(from, to, from_orig)),
