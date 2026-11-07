@@ -46,6 +46,16 @@ mod upstream {
         }
     }
 
+    /// Puts `point` (on layer `layer`) in front of a searched path, `extra_length` added to its length.
+    pub(super) fn prepend_point(path: &mut Path, point: Vec2, layer: u8, extra_length: f32) {
+        path.path.insert(0, point);
+        path.length += extra_length;
+        #[cfg(feature = "detailed-layers")]
+        path.path_with_layers.insert(0, (point, layer));
+        #[cfg(not(feature = "detailed-layers"))]
+        let _ = layer;
+    }
+
     /// A path that was not produced by a search (no polygon or layer details).
     pub(super) fn new_path(length: f32, path: Vec<Vec2>) -> Path {
         Path {
@@ -97,6 +107,9 @@ mod upstream {
 use tracing::instrument;
 
 const EPSILON: f32 = 0.001;
+/// A corrected start point closer than this to the original start is not added to the path: it would only make a
+/// near-zero first segment (an agent standing on the mesh border).
+const MIN_START_CORRECTION: f32 = EPSILON;
 
 /// The mode given to the navigation algorithm to determine which kind of behaviour we expect when the start or end
 /// point is not within the mesh.
@@ -297,8 +310,10 @@ impl PathApproxResult {
     }
 }
 
+/// The path inside one polygon: straight to `to`, through the corrected start `from` first if it is more than
+/// [`MIN_START_CORRECTION`] away from the original start `from_orig`.
 fn new_possibly_corrected_path(from: Vec2, to: Vec2, from_orig: Vec2) -> Path {
-    if from != from_orig {
+    if from_orig.distance(from) > MIN_START_CORRECTION {
         upstream::new_path(from_orig.distance(from) + from.distance(to), vec![from, to])
     }
     else {
@@ -336,8 +351,9 @@ impl<'m> MeshAagu<'m> {
     /// This method is blocking.
     /// - If the starting point and the end point are within the mesh:
     ///   - a path within the mesh is returned.
-    /// - If the starting point is not within the mesh:
-    ///   - a straight path to the target point is returned.
+    /// - If the starting point is not within the mesh and gets corrected ([`PointCorrectionMode`]):
+    ///   - the path starts with the corrected start point (unless it is closer than 0.001 to the
+    ///     original one), and the length includes the way from the original start to it.
     /// - If the starting point is within the mesh but the target point is not within the mesh:
     ///   - the target point will be replaced by the point that is closest to the target point,
     ///     that is still reachable from the starting point.
@@ -467,7 +483,13 @@ impl<'m> MeshAagu<'m> {
             #[cfg(feature = "stats")]
             start,
         ) {
-            upstream::SearchResult::Found(path) => {
+            upstream::SearchResult::Found(mut path) => {
+                // the search starts at the (corrected) start and does not include it: a corrected start is the first
+                // point the agent has to walk to (as in `new_possibly_corrected_path`)
+                let correction = from_orig.distance(from);
+                if correction > MIN_START_CORRECTION {
+                    upstream::prepend_point(&mut path, from, upstream::layer_of(starting_polygon_idx), correction);
+                }
                 return PathApproxResult { path: Some(path), status: status.with_status(NavigationResultStatus::PathFound) };
             }
             upstream::SearchResult::NotFound => {

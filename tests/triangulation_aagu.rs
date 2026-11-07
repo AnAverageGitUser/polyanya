@@ -468,3 +468,62 @@ fn approx_path_both_outside_corrected() {
     assert_matches!(result.status.start, PointStatus::Modified { .. });
     assert_matches!(result.status.end, PointStatus::Modified { .. });
 }
+
+/// A wall from the bottom edge up to y = 8 between x = 4 and 6, in a 10 × 10 square.
+fn make_wall_mesh() -> Mesh {
+    let mut tri = Triangulation::from_outer_edges(&[vec2(0.0, 0.0), vec2(10.0, 0.0), vec2(10.0, 10.0), vec2(0.0, 10.0)]);
+    tri.add_obstacle(vec![vec2(4.0, 0.0), vec2(6.0, 0.0), vec2(6.0, 8.0), vec2(4.0, 8.0)]);
+    let mut mesh = tri.as_navmesh();
+    mesh.bake();
+    mesh
+}
+
+fn path_length(start: glam::Vec2, points: &[glam::Vec2]) -> f32 {
+    std::iter::once(&start).chain(points).zip(points).map(|(a, b)| a.distance(*b)).sum()
+}
+
+/// a corrected start is the first point of a searched path, and the length
+/// includes the way from the original start to it — as in the same-polygon shortcut.
+#[test]
+fn approx_path_corrected_start_is_the_first_point_of_a_searched_path() {
+    let mesh = make_wall_mesh();
+    let aagu = MeshAagu::new(&mesh);
+    let (from, to) = (vec2(4.5, 4.0), vec2(9.0, 1.0)); // inside the wall near its left side, end behind it
+    let result = aagu.approx_path(from, to, NavigationRequestSettings::default());
+    let PointStatus::Modified { modified, .. } = result.status.start else { panic!("start corrected: {:?}", result.status) };
+    let path = result.path.expect("path");
+    assert!(path.path.len() > 2, "a searched path (around the wall): {:?}", path.path);
+    assert_eq!(path.path[0], modified, "{:?}", path.path);
+    assert_eq!(*path.path.last().unwrap(), to);
+    assert!((path.length - path_length(from, &path.path)).abs() < 0.001, "{} vs {:?}", path.length, path.path);
+}
+
+/// The same-polygon shortcut and the search agree: the path starts with the corrected start and the length counts it.
+#[test]
+fn approx_path_corrected_start_same_polygon_counts_the_correction() {
+    let mesh = make_wall_mesh();
+    let aagu = MeshAagu::new(&mesh);
+    let (from, to) = (vec2(10.5, 9.5), vec2(9.9, 9.9)); // just outside the outer edge, end next to it
+    let result = aagu.approx_path(from, to, NavigationRequestSettings::default());
+    let PointStatus::Modified { modified, .. } = result.status.start else { panic!("start corrected: {:?}", result.status) };
+    let path = result.path.expect("path");
+    assert_eq!(path.path, vec![modified, to]);
+    assert!((path.length - path_length(from, &path.path)).abs() < 0.001);
+}
+
+/// A correction too small to matter (the agent stands on the mesh border) adds no extra point: no zero-length first
+/// segment for the caller.
+#[test]
+fn approx_path_tiny_start_correction_adds_no_point() {
+    let mesh = make_wall_mesh();
+    let aagu = MeshAagu::new(&mesh);
+    let to = vec2(9.0, 1.0);
+    let from = vec2(4.0 + 0.00001, 4.0); // on the wall's edge, a hair inside the wall
+    let result = aagu.approx_path(from, to, NavigationRequestSettings::default());
+    let path = result.path.expect("path");
+    if let PointStatus::Modified { modified, .. } = result.status.start {
+        assert!(modified.distance(from) < 0.001, "tiny correction: {modified}");
+        assert_ne!(path.path[0], modified, "no near-zero first segment: {:?}", path.path);
+    }
+    assert_eq!(*path.path.last().unwrap(), to);
+}
