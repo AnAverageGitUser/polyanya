@@ -318,16 +318,18 @@ impl<'m> MeshAagu<'m> {
         Self { mesh }
     }
 
-    /// Retrieve the island ID that the given point is in.
-    /// If the point is not within any islands, `None` is retured.
+    /// Retrieve the ID of the island (connected part of a layer) that the given point is in: two points have the same
+    /// ID exactly when they are in the same island. The ID is the polygon ID of the island's representative polygon.
+    /// `None` if the point is not within the mesh or the mesh's islands are not baked ([`Mesh::bake`]).
     pub fn get_island_id(&self, pos: Vec2) -> Option<u32> {
-        let island_id = self.get_point_location_ignore_delta(pos);
-        if island_id == u32::MAX {
-            None
+        let polygon_id = self.get_point_location_ignore_delta(pos);
+        if polygon_id == u32::MAX {
+            return None;
         }
-        else {
-            Some(island_id)
-        }
+        let layer_idx = upstream::layer_of(polygon_id);
+        let islands = upstream::islands(&self.mesh.layers[layer_idx as usize])?;
+        let island = islands[upstream::polygon_of(polygon_id) as usize];
+        Some(upstream::polygon_id(layer_idx, island as u32))
     }
 
     /// Compute a path between two points.
@@ -819,6 +821,17 @@ mod tests {
         assert!(left.is_some());
         assert!(right.is_some());
         assert_ne!(left, right);
+    }
+
+    /// the id is the island's, not the polygon's.
+    #[test]
+    fn island_id_is_the_same_for_different_polygons_of_one_island() {
+        let mesh = simple_mesh_with_obstacle();
+        let aagu = MeshAagu { mesh: &mesh };
+        let (a, b) = (vec2(1.0, 1.0), vec2(9.0, 9.0));
+        assert_ne!(aagu.get_point_location_ignore_delta(a), aagu.get_point_location_ignore_delta(b), "precondition: different polygons");
+        assert!(aagu.get_island_id(a).is_some());
+        assert_eq!(aagu.get_island_id(a), aagu.get_island_id(b));
     }
 
     #[test]
