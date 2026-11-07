@@ -1,9 +1,97 @@
-use std::collections::HashSet;
+//! Additions of the `aagu` fork (kept out of upstream files so that upstream can be merged with few conflicts):
+//! pathfinding where start and end may lie outside the mesh ([`MeshAagu::approx_path`] with [`PointCorrectionMode`]
+//! and [`DifferentIslandMode`]) and island queries ([`MeshAagu::get_island_id`]).
+//!
+//! Every access to crate-internal upstream items goes through the private module `upstream` below, so an internal
+//! change upstream breaks only that module.
+
 use std::iter;
 use glam::Vec2;
 use log::error;
-use crate::instance::{InstanceStep, SearchInstance, U32Layer};
 use crate::{Mesh, Path};
+
+/// The only place where this module uses crate-internal upstream items (`pub(crate)` or private: the search
+/// instance, the polygon id encoding, baked islands and polygon finder, `Path` fields). When an upstream merge breaks
+/// the build, adapt this module; the rest of `lib_aagu` uses it and the public API only.
+mod upstream {
+    use std::collections::HashSet;
+    use glam::Vec2;
+    use crate::instance::{InstanceStep, SearchInstance, U32Layer};
+    use crate::{Layer, Mesh, Path};
+
+    /// The id of polygon `polygon` in layer `layer`, in upstream's encoding (layer in the high byte, `U32Layer`).
+    #[inline(always)]
+    pub(super) fn polygon_id(layer: u8, polygon: u32) -> u32 { u32::from_layer_and_polygon(layer, polygon) }
+
+    /// The layer index of a polygon id.
+    #[inline(always)]
+    pub(super) fn layer_of(id: u32) -> u8 { id.layer() }
+
+    /// The polygon index (within its layer) of a polygon id.
+    #[inline(always)]
+    pub(super) fn polygon_of(id: u32) -> u32 { id.polygon() }
+
+    /// The island of every polygon of `layer` (indexed by polygon index); `None` if the islands are not baked.
+    #[inline(always)]
+    pub(super) fn islands(layer: &Layer) -> Option<&[usize]> { layer.islands.as_deref() }
+
+    /// The first polygon of `layer` that contains `point` (layer coordinates, no search delta): through the baked
+    /// polygon finder if there is one, else by scanning the polygons.
+    #[inline(always)]
+    pub(super) fn locate_in_layer(layer: &Layer, point: Vec2) -> Option<u32> {
+        if layer.baked_polygons.is_none() {
+            layer.get_point_locations_unit(point).next()
+        } else {
+            layer.get_point_locations_unit_baked(&point).next()
+        }
+    }
+
+    /// A path that was not produced by a search (no polygon or layer details).
+    pub(super) fn new_path(length: f32, path: Vec<Vec2>) -> Path {
+        Path {
+            length,
+            path,
+            #[cfg(feature = "detailed-layers")]
+            path_with_layers: vec![],
+            path_through_polygons: vec![],
+        }
+    }
+
+    /// The outcome of [`search`].
+    pub(super) enum SearchResult {
+        Found(Path),
+        /// The search ran out of nodes.
+        NotFound,
+        /// `max_steps` steps were not enough (protection against endless searches).
+        StepLimit,
+    }
+
+    /// Upstream's Polyanya search from `from` (point, polygon id) to `to`, at most `max_steps` search steps.
+    pub(super) fn search(
+        mesh: &Mesh,
+        from: (Vec2, u32),
+        to: (Vec2, u32),
+        max_steps: usize,
+        #[cfg(feature = "stats")] start: std::time::Instant,
+    ) -> SearchResult {
+        let mut search_instance = SearchInstance::setup(
+            mesh,
+            (from.0, &[from.1]),
+            (to.0, &[to.1]),
+            HashSet::new(),
+            #[cfg(feature = "stats")]
+            start,
+        );
+        for _ in 0..max_steps {
+            match search_instance.next() {
+                InstanceStep::Found(path) => return SearchResult::Found(path),
+                InstanceStep::NotFound => return SearchResult::NotFound,
+                InstanceStep::Continue => (),
+            }
+        }
+        SearchResult::StepLimit
+    }
+}
 
 #[cfg(feature = "tracing")]
 use tracing::instrument;
@@ -211,22 +299,10 @@ impl PathApproxResult {
 
 fn new_possibly_corrected_path(from: Vec2, to: Vec2, from_orig: Vec2) -> Path {
     if from != from_orig {
-        Path {
-            length: from_orig.distance(from) + from.distance(to),
-            path: vec![from, to],
-            #[cfg(feature = "detailed-layers")]
-            path_with_layers: vec![],
-            path_through_polygons: vec![],
-        }
+        upstream::new_path(from_orig.distance(from) + from.distance(to), vec![from, to])
     }
     else {
-        Path {
-            length: from.distance(to),
-            path: vec![to],
-            #[cfg(feature = "detailed-layers")]
-            path_with_layers: vec![],
-            path_through_polygons: vec![],
-        }
+        upstream::new_path(from.distance(to), vec![to])
     }
 }
 
@@ -292,9 +368,9 @@ impl<'m> MeshAagu<'m> {
         }
         debug_assert_ne!(starting_polygon_idx, u32::MAX);
 
-        let layer = &self.mesh.layers[starting_polygon_idx.layer() as usize];
-        let islands = layer.islands.as_ref().expect("island baking is a prerequisite");
-        let starting_island = islands[starting_polygon_idx.polygon() as usize];
+        let layer = &self.mesh.layers[upstream::layer_of(starting_polygon_idx) as usize];
+        let islands = upstream::islands(layer).expect("island baking is a prerequisite");
+        let starting_island = islands[upstream::polygon_of(starting_polygon_idx) as usize];
 
         match settings.islands {
             DifferentIslandMode::NoPath => {
@@ -309,9 +385,9 @@ impl<'m> MeshAagu<'m> {
                     if to != to_orig {
                         status = status.with_end(PointStatus::Modified { original: to_orig, modified: to })
                     }
-                    let end_layer = &self.mesh.layers[ending_polygon_idx.layer() as usize];
-                    let end_islands = end_layer.islands.as_ref().expect("island baking is a prerequisite");
-                    if starting_island != end_islands[ending_polygon_idx.polygon() as usize] {
+                    let end_layer = &self.mesh.layers[upstream::layer_of(ending_polygon_idx) as usize];
+                    let end_islands = upstream::islands(end_layer).expect("island baking is a prerequisite");
+                    if starting_island != end_islands[upstream::polygon_of(ending_polygon_idx) as usize] {
                         // in this case, the corrected target point got snapped to its closest island
                         // but the island was different to the start island
                         return PathApproxResult {
@@ -321,9 +397,9 @@ impl<'m> MeshAagu<'m> {
                     }
                 }
                 else {
-                    let end_layer = &self.mesh.layers[ending_polygon_idx.layer() as usize];
-                    let end_islands = end_layer.islands.as_ref().expect("island baking is a prerequisite");
-                    if end_islands[ending_polygon_idx.polygon() as usize] != starting_island {
+                    let end_layer = &self.mesh.layers[upstream::layer_of(ending_polygon_idx) as usize];
+                    let end_islands = upstream::islands(end_layer).expect("island baking is a prerequisite");
+                    if end_islands[upstream::polygon_of(ending_polygon_idx) as usize] != starting_island {
                         return PathApproxResult {
                             path: None,
                             status: status.with_status(NavigationResultStatus::DifferentIslands),
@@ -335,9 +411,9 @@ impl<'m> MeshAagu<'m> {
                 let needs_fix = if ending_polygon_idx == u32::MAX {
                     true
                 } else {
-                    let end_layer = &self.mesh.layers[ending_polygon_idx.layer() as usize];
-                    let end_islands = end_layer.islands.as_ref().expect("island baking is a prerequisite");
-                    end_islands[ending_polygon_idx.polygon() as usize] != starting_island
+                    let end_layer = &self.mesh.layers[upstream::layer_of(ending_polygon_idx) as usize];
+                    let end_islands = upstream::islands(end_layer).expect("island baking is a prerequisite");
+                    end_islands[upstream::polygon_of(ending_polygon_idx) as usize] != starting_island
                 };
                 if needs_fix {
                     let same_island_as_start = |poly_idx: usize| {
@@ -379,28 +455,24 @@ impl<'m> MeshAagu<'m> {
             }
         }
 
-        let mut search_instance = SearchInstance::setup(
-            self.mesh,
-            (from, &[starting_polygon_idx]),
-            (to, &[ending_polygon_idx]),
-            HashSet::new(),
-            #[cfg(feature = "stats")]
-            start,
-        );
-
         // Limit search to avoid an infinite loop.
         let total_polygons: usize = self.mesh.layers.iter().map(|l| l.polygons.len()).sum();
-        for _ in 0..total_polygons * 1000 {
-            match search_instance.next() {
-                InstanceStep::Found(path) => {
-                    return PathApproxResult { path: Some(path), status: status.with_status(NavigationResultStatus::PathFound) };
-                },
-                InstanceStep::NotFound => {
-                    error!("Search from {from_orig} (corrected {from}) to {to_orig} (corrected {to}) failed. Please check if the mesh is valid as this should not happen as we've made sure that the two point are within the same mesh island.");
-                    return PathApproxResult { path: None, status: status.with_status(NavigationResultStatus::OutsideMesh) }
-                }
-                InstanceStep::Continue => (),
+        match upstream::search(
+            self.mesh,
+            (from, starting_polygon_idx),
+            (to, ending_polygon_idx),
+            total_polygons * 1000,
+            #[cfg(feature = "stats")]
+            start,
+        ) {
+            upstream::SearchResult::Found(path) => {
+                return PathApproxResult { path: Some(path), status: status.with_status(NavigationResultStatus::PathFound) };
             }
+            upstream::SearchResult::NotFound => {
+                error!("Search from {from_orig} (corrected {from}) to {to_orig} (corrected {to}) failed. Please check if the mesh is valid as this should not happen as we've made sure that the two point are within the same mesh island.");
+                return PathApproxResult { path: None, status: status.with_status(NavigationResultStatus::OutsideMesh) }
+            }
+            upstream::SearchResult::StepLimit => (),
         }
 
         error!("Search from {from_orig} (corrected {from}) to {to_orig} (corrected {to}) failed. Please check if the mesh is valid as this should not happen. Infinite prevention triggered.");
@@ -456,8 +528,8 @@ impl<'m> MeshAagu<'m> {
                 return Some(point);
             }
         }
-        let layer = &self.mesh.layers[polygon_idx.layer() as usize];
-        let concave_polygon = &layer.polygons[polygon_idx.polygon() as usize];
+        let layer = &self.mesh.layers[upstream::layer_of(polygon_idx) as usize];
+        let concave_polygon = &layer.polygons[upstream::polygon_of(polygon_idx) as usize];
         let concave_poly_center = concave_polygon.vertices
             .iter()
             .map(|idx| layer.vertices[*idx as usize].coords)
@@ -533,7 +605,7 @@ impl<'m> MeshAagu<'m> {
                     let dist_sq = on_line_segment.distance_squared(point_outside_mesh);
                     if dist_sq <= distance_squared { // use "<=" to overwrite possible "None" element
                         distance_squared = dist_sq;
-                        closest = Some((on_line_segment, u32::from_layer_and_polygon(layer_idx as u8, poly_idx as u32), max_dist_sq));
+                        closest = Some((on_line_segment, upstream::polygon_id(layer_idx as u8, poly_idx as u32), max_dist_sq));
                     }
                 }
             }
@@ -561,7 +633,7 @@ impl<'m> MeshAagu<'m> {
                     let dist_sq = p.distance_squared(point_outside_mesh);
                     if dist_sq <= distance_squared { // use "<=" to overwrite possible "None" element
                         distance_squared = dist_sq;
-                        closest = Some((p, u32::from_layer_and_polygon(layer_idx as u8, poly_idx as u32), max_dist_sq));
+                        closest = Some((p, upstream::polygon_id(layer_idx as u8, poly_idx as u32), max_dist_sq));
                     }
                 }
             }
@@ -574,13 +646,8 @@ impl<'m> MeshAagu<'m> {
     fn get_point_location_ignore_delta(&self, point: Vec2) -> u32 {
         // Search across all layers, return the first match
         for (layer_idx, layer) in self.mesh.layers.iter().enumerate() {
-            let result = if layer.baked_polygons.is_none() {
-                layer.get_point_locations_unit(point).next()
-            } else {
-                layer.get_point_locations_unit_baked(&point).next()
-            };
-            if let Some(poly_idx) = result {
-                return u32::from_layer_and_polygon(layer_idx as u8, poly_idx);
+            if let Some(poly_idx) = upstream::locate_in_layer(layer, point) {
+                return upstream::polygon_id(layer_idx as u8, poly_idx);
             }
         }
         u32::MAX
