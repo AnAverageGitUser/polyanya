@@ -322,7 +322,7 @@ fn approx_path_start_outside_corrected() {
     let mesh = make_obstacle_mesh();
     let aagu = MeshAagu::new(&mesh);
     let settings = NavigationRequestSettings {
-        start: PointCorrectionMode::ClosestPointInMesh(f32::INFINITY),
+        start: PointCorrectionMode::ClosestMeshEdge(f32::INFINITY),
         ..Default::default()
     };
     let result = aagu.approx_path(vec2(-2.0, 10.0), vec2(18.0, 10.0), settings);
@@ -331,11 +331,11 @@ fn approx_path_start_outside_corrected() {
 }
 
 #[test]
-fn approx_path_end_outside_corrected_closest_point() {
+fn approx_path_end_outside_corrected_closest_edge() {
     let mesh = make_obstacle_mesh();
     let aagu = MeshAagu::new(&mesh);
     let settings = NavigationRequestSettings {
-        end: PointCorrectionMode::ClosestPointInMesh(f32::INFINITY),
+        end: PointCorrectionMode::ClosestMeshEdge(f32::INFINITY),
         ..Default::default()
     };
     let result = aagu.approx_path(vec2(2.0, 10.0), vec2(25.0, 10.0), settings);
@@ -344,11 +344,11 @@ fn approx_path_end_outside_corrected_closest_point() {
 }
 
 #[test]
-fn approx_path_end_outside_corrected_closest_edge() {
+fn approx_path_end_outside_corrected_closest_vertex() {
     let mesh = make_obstacle_mesh();
     let aagu = MeshAagu::new(&mesh);
     let settings = NavigationRequestSettings {
-        end: PointCorrectionMode::ClosestMeshEdge(f32::INFINITY),
+        end: PointCorrectionMode::ClosestMeshVertex(f32::INFINITY),
         ..Default::default()
     };
     let result = aagu.approx_path(vec2(2.0, 10.0), vec2(25.0, 10.0), settings);
@@ -419,7 +419,7 @@ fn approx_path_max_dist_too_small_for_correction() {
     let mesh = make_obstacle_mesh();
     let aagu = MeshAagu::new(&mesh);
     let settings = NavigationRequestSettings {
-        start: PointCorrectionMode::ClosestPointInMesh(0.5),
+        start: PointCorrectionMode::ClosestMeshEdge(0.5),
         ..Default::default()
     };
     let result = aagu.approx_path(vec2(-5.0, 10.0), vec2(18.0, 10.0), settings);
@@ -446,7 +446,7 @@ fn approx_path_end_in_obstacle_corrected() {
     let mesh = make_obstacle_mesh();
     let aagu = MeshAagu::new(&mesh);
     let settings = NavigationRequestSettings {
-        end: PointCorrectionMode::ClosestPointInMesh(f32::INFINITY),
+        end: PointCorrectionMode::ClosestMeshEdge(f32::INFINITY),
         ..Default::default()
     };
     let result = aagu.approx_path(vec2(2.0, 10.0), vec2(10.0, 10.0), settings);
@@ -459,8 +459,8 @@ fn approx_path_both_outside_corrected() {
     let mesh = make_obstacle_mesh();
     let aagu = MeshAagu::new(&mesh);
     let settings = NavigationRequestSettings {
-        start: PointCorrectionMode::ClosestPointInMesh(f32::INFINITY),
-        end: PointCorrectionMode::ClosestPointInMesh(f32::INFINITY),
+        start: PointCorrectionMode::ClosestMeshEdge(f32::INFINITY),
+        end: PointCorrectionMode::ClosestMeshEdge(f32::INFINITY),
         ..Default::default()
     };
     let result = aagu.approx_path(vec2(-2.0, 10.0), vec2(25.0, 10.0), settings);
@@ -526,4 +526,23 @@ fn approx_path_tiny_start_correction_adds_no_point() {
         assert_ne!(path.path[0], modified, "no near-zero first segment: {:?}", path.path);
     }
     assert_eq!(*path.path.last().unwrap(), to);
+}
+
+/// `ClosestMeshEdge` snaps to the closest edge point, `ClosestMeshVertex` to the
+/// closest polygon corner — in the middle of a long wall these are far apart.
+#[test]
+fn closest_mesh_edge_snaps_to_the_edge_closest_mesh_vertex_to_a_corner() {
+    let mesh = make_wall_mesh(); // wall x 4..6, y 0..8
+    let aagu = MeshAagu::new(&mesh);
+    let (from, to) = (vec2(4.5, 4.0), vec2(1.0, 1.0)); // in the wall near its left side, end left of it
+    let snapped = |mode| {
+        let result = aagu.approx_path(from, to, NavigationRequestSettings { start: mode, ..Default::default() });
+        let PointStatus::Modified { modified, .. } = result.status.start else { panic!("start corrected: {:?}", result.status) };
+        modified
+    };
+    let edge = snapped(PointCorrectionMode::ClosestMeshEdge(f32::INFINITY));
+    assert!(edge.distance(vec2(4.0, 4.0)) < 0.01, "beside the start on the wall's left side: {edge}");
+    let vertex = snapped(PointCorrectionMode::ClosestMeshVertex(f32::INFINITY));
+    assert!(vertex.distance(from) > 3.0, "a corner, far from the start: {vertex}");
+    assert!(vertex.x <= 4.0 + 0.01 || vertex.y >= 8.0 - 0.01, "a corner outside the wall: {vertex}");
 }

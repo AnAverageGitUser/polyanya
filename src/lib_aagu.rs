@@ -8,7 +8,7 @@
 use std::iter;
 use glam::Vec2;
 use log::error;
-use crate::{Mesh, Path};
+use crate::{Layer, Mesh, Path, Polygon};
 
 /// The only place where this module uses crate-internal upstream items (`pub(crate)` or private: the search
 /// instance, the polygon id encoding, baked islands and polygon finder, `Path` fields). When an upstream merge breaks
@@ -54,6 +54,20 @@ mod upstream {
         path.path_with_layers.insert(0, (point, layer));
         #[cfg(not(feature = "detailed-layers"))]
         let _ = layer;
+    }
+
+    /// The bounding box of all polygons of `layer` (from the baked polygon finder); `None` if not baked.
+    pub(super) fn layer_bounds(layer: &Layer) -> Option<(Vec2, Vec2)> {
+        let envelope = layer.baked_polygons.as_ref()?.root().envelope();
+        let (lo, hi) = (envelope.lower(), envelope.upper());
+        Some((Vec2::new(lo[0], lo[1]), Vec2::new(hi[0], hi[1])))
+    }
+
+    /// The polygons of `layer` whose bounding box touches the box `min`..`max` (baked polygon finder), in no particular
+    /// order; `None` if not baked.
+    pub(super) fn polygons_in_box(layer: &Layer, min: Vec2, max: Vec2) -> Option<impl Iterator<Item = usize> + '_> {
+        let envelope = rstar::AABB::from_corners([min.x, min.y], [max.x, max.y]);
+        Some(layer.baked_polygons.as_ref()?.locate_in_envelope_intersecting(envelope).map(|bp| bp.index))
     }
 
     /// A path that was not produced by a search (no polygon or layer details).
@@ -123,11 +137,12 @@ pub enum PointCorrectionMode {
     /// Choose this for the end point, if your agents must not start moving to the target if the target is outside of
     /// the navmesh. The target point is the deemed unreachable.
     NoCorrection,
-    /// This is a somewhat more complicated, more expensive, but higher quality calculation method than
-    /// [`PointCorrectionMode::ClosestMeshEdge`].
+    /// Snap to the closest point on a polygon edge: the point is projected onto every polygon edge, the closest
+    /// projection wins, and it is nudged slightly into its polygon. For a point outside the mesh this is
+    /// (approximately) the closest point within the mesh. More expensive, but higher quality than
+    /// [`PointCorrectionMode::ClosestMeshVertex`].
     ///
-    /// If the point is not within the mesh, find a point that is approximately the closest to that point but within the
-    /// mesh and within the given distance.
+    /// If the point is not within the mesh, find that point within the given distance.
     /// If that point exists, use that point as the next (if used for start point) or previous (if used for end point)
     /// waypoint of the given point, otherwise return no path.
     /// If you want to allow arbitrary distances, parameterize with `f32::INFINITY`.
@@ -138,20 +153,20 @@ pub enum PointCorrectionMode {
     ///
     /// Choose this for the end point, if the agent should move to the closest point within the navmesh possible,
     /// when the end point is outside the navmesh - but still within the given distance of the navmesh.
-    ClosestPointInMesh(f32),
-    /// This is a somewhat easier, cheaper, but lower quality calculation method than
-    /// [`PointCorrectionMode::ClosestPointInMesh`].
-    /// Refer to that item for some more info.
+    ClosestMeshEdge(f32),
+    /// Snap to the closest polygon vertex (corner), nudged slightly into its polygon. Cheaper, but lower quality than
+    /// [`PointCorrectionMode::ClosestMeshEdge`]: the closest vertex can be much farther away than the closest edge point
+    /// (e.g. the middle of a long wall). Refer to that item for some more info.
     ///
-    /// If the point is not within the mesh, find the closest edge point of the mesh that is within the given distance.
+    /// If the point is not within the mesh, find the closest vertex of the mesh that is within the given distance.
     /// If that point exists, use that point as the next (if used for start point) or previous (if used for end point)
     /// waypoint of the given point, otherwise return no path.
     /// If you want to allow arbitrary distances, parameterize with `f32::INFINITY`.
-    ClosestMeshEdge(f32),
+    ClosestMeshVertex(f32),
 }
 impl Default for PointCorrectionMode {
     fn default() -> Self {
-        PointCorrectionMode::ClosestPointInMesh(f32::INFINITY)
+        PointCorrectionMode::ClosestMeshEdge(f32::INFINITY)
     }
 }
 /// The mode given to the navigation algorithm to determine which kind of behaviour we expect when the
@@ -194,9 +209,9 @@ pub struct NavigationRequestSettings {
 impl Default for NavigationRequestSettings {
     fn default() -> Self {
         Self {
-            start: PointCorrectionMode::ClosestPointInMesh(f32::INFINITY),
+            start: PointCorrectionMode::ClosestMeshEdge(f32::INFINITY),
             islands: DifferentIslandMode::ClosestOnStartIsland,
-            end: PointCorrectionMode::ClosestPointInMesh(f32::INFINITY),
+            end: PointCorrectionMode::ClosestMeshEdge(f32::INFINITY),
             _agent_radius: 0.0,
             _max_length: 0.0,
         }
@@ -515,13 +530,13 @@ impl<'m> MeshAagu<'m> {
             PointCorrectionMode::NoCorrection => {
                 return Err(NavigationResultStatus::OutsideMesh);
             },
-            PointCorrectionMode::ClosestPointInMesh(max_dist) => {
+            PointCorrectionMode::ClosestMeshEdge(max_dist) => {
                 if *max_dist == 0.0 {
                     return Err(NavigationResultStatus::OutsideMesh);
                 }
                 self.find_closest_point_on_edge(outside_mesh_point, *max_dist, &polygon_filter)
             }
-            PointCorrectionMode::ClosestMeshEdge(max_dist) => {
+            PointCorrectionMode::ClosestMeshVertex(max_dist) => {
                 if *max_dist == 0.0 {
                     return Err(NavigationResultStatus::OutsideMesh);
                 }
@@ -598,71 +613,99 @@ impl<'m> MeshAagu<'m> {
         Some(concave_poly_center)
     }
 
-    /// Returns the closest point (with a tolerance of `EPSILON`) in the mesh to the given point.
-    /// Should only be called when the given point is outside the mesh, as this iterates over every polygon and is more of a last resort fallback.
-    /// If the point is inside the mesh, the `SearchInstance` should be used instead.
+    /// The closest point on a polygon edge (projection clipped to the edge, with a tolerance of `EPSILON`) within
+    /// `max_dist` of `point`, as (point, polygon id, `max_dist²`). For points outside the mesh (a fallback, not for
+    /// points inside it).
     #[inline(always)]
-    fn find_closest_point_on_edge(&self, point_outside_mesh: Vec2, max_dist: f32, polygon_filter: impl Fn(usize) -> bool) -> Option<(Vec2, u32, f32)> {
-        let max_dist_sq = max_dist * max_dist;
-        let mut closest = None;
-        let mut distance_squared = max_dist_sq;
-        for (layer_idx, layer) in self.mesh.layers.iter().enumerate() {
-            for (poly_idx, poly) in layer.polygons.iter().enumerate() {
-                if !polygon_filter(poly_idx) {
-                    // do not consider this polygon because of the filter predicate
-                    continue;
-                }
-
-                for (p1i, p2i) in poly.vertices.iter()
-                    .zip(
-                        poly.vertices.iter()
-                            .skip(1)
-                            .chain(
-                                iter::once(poly.vertices.first().expect("polygon must not be empty"))
-                            )
-                    )
-                    .map(|(a, b)| (*a as usize, *b as usize))
-                {
-                    let p1 = layer.vertices[p1i].coords;
-                    let p2 = layer.vertices[p2i].coords;
-                    let on_line_segment = calc_projected_and_clipped_pos_on_line_segment(p1, p2, point_outside_mesh, EPSILON);
-                    let dist_sq = on_line_segment.distance_squared(point_outside_mesh);
-                    if dist_sq <= distance_squared { // use "<=" to overwrite possible "None" element
-                        distance_squared = dist_sq;
-                        closest = Some((on_line_segment, upstream::polygon_id(layer_idx as u8, poly_idx as u32), max_dist_sq));
-                    }
-                }
-            }
-        }
-        closest
+    fn find_closest_point_on_edge(&self, point: Vec2, max_dist: f32, polygon_filter: impl Fn(usize) -> bool) -> Option<(Vec2, u32, f32)> {
+        self.find_closest(point, max_dist, polygon_filter, closest_edge_point_of_polygon, true)
     }
 
-    /// Returns the closest vertex of the mesh to the given point.
-    /// Should only be called when the given point is outside the mesh, as this iterates over every polygon and is more of a last resort fallback.
-    /// If the point is inside the mesh, the `SearchInstance` should be used instead.
+    /// The closest polygon vertex within `max_dist` of `point`, as (vertex, polygon id, `max_dist²`). For points outside
+    /// the mesh.
     #[inline(always)]
-    fn find_closest_mesh_vertex(&self, point_outside_mesh: Vec2, max_dist: f32, polygon_filter: impl Fn(usize) -> bool) -> Option<(Vec2, u32, f32)> {
-        let max_dist_sq = max_dist * max_dist;
-        let mut closest = None;
-        let mut distance_squared = max_dist_sq;
-        for (layer_idx, layer) in self.mesh.layers.iter().enumerate() {
-            for (poly_idx, poly) in layer.polygons.iter().enumerate() {
-                if !polygon_filter(poly_idx) {
-                    // do not consider this polygon because of the filter predicate
-                    continue;
-                }
+    fn find_closest_mesh_vertex(&self, point: Vec2, max_dist: f32, polygon_filter: impl Fn(usize) -> bool) -> Option<(Vec2, u32, f32)> {
+        self.find_closest(point, max_dist, polygon_filter, closest_vertex_of_polygon, true)
+    }
 
-                for vertex_idx in poly.vertices.iter() {
-                    let p = layer.vertices[*vertex_idx as usize].coords;
-                    let dist_sq = p.distance_squared(point_outside_mesh);
-                    if dist_sq <= distance_squared { // use "<=" to overwrite possible "None" element
-                        distance_squared = dist_sq;
-                        closest = Some((p, upstream::polygon_id(layer_idx as u8, poly_idx as u32), max_dist_sq));
-                    }
+    /// The closest point over all polygons that pass `polygon_filter`, where `in_polygon` gives a polygon's closest
+    /// point and its squared distance. Only candidates within `max_dist` count.
+    ///
+    /// The result is that of scanning every polygon of every layer in order (the last of equally close candidates
+    /// wins, i.e. the highest polygon id), but with `use_index` and a baked layer only the polygons whose bounding box
+    /// is near enough are looked at: for a finite `max_dist` those within `max_dist`, otherwise
+    /// a growing box around `point` until it holds a candidate closer than the box's half size.
+    fn find_closest(
+        &self,
+        point: Vec2,
+        max_dist: f32,
+        polygon_filter: impl Fn(usize) -> bool,
+        in_polygon: InPolygon,
+        use_index: bool,
+    ) -> Option<(Vec2, u32, f32)> {
+        let max_dist_sq = max_dist * max_dist;
+        let mut best: Option<(Vec2, u32, f32)> = None; // (point, polygon id, squared distance)
+        let consider = |layer_idx: usize, layer: &Layer, poly_idx: usize, best: &mut Option<(Vec2, u32, f32)>| {
+            if !polygon_filter(poly_idx) {
+                return;
+            }
+            let Some((p, dist_sq)) = in_polygon(layer, &layer.polygons[poly_idx], point) else { return };
+            if dist_sq > max_dist_sq {
+                return;
+            }
+            let id = upstream::polygon_id(layer_idx as u8, poly_idx as u32);
+            let better = match best {
+                None => true,
+                Some((_, best_id, best_dist_sq)) => dist_sq < *best_dist_sq || (dist_sq == *best_dist_sq && id > *best_id),
+            };
+            if better {
+                *best = Some((p, id, dist_sq));
+            }
+        };
+        for (layer_idx, layer) in self.mesh.layers.iter().enumerate() {
+            let bounds = if use_index { upstream::layer_bounds(layer) } else { None };
+            let Some((layer_min, layer_max)) = bounds else {
+                for poly_idx in 0..layer.polygons.len() {
+                    consider(layer_idx, layer, poly_idx, &mut best);
                 }
+                continue;
+            };
+            if max_dist.is_finite() {
+                let candidates = upstream::polygons_in_box(layer, point - Vec2::splat(max_dist), point + Vec2::splat(max_dist))
+                    .expect("baked: the layer has bounds");
+                for poly_idx in candidates {
+                    consider(layer_idx, layer, poly_idx, &mut best);
+                }
+                continue;
+            }
+            // unbounded: grow the box until a candidate of this layer is closer than its half size (anything outside
+            // the box is farther), or the box covers the whole layer
+            let mut half = 1.0f32;
+            loop {
+                let (min, max) = (point - Vec2::splat(half), point + Vec2::splat(half));
+                let mut layer_best: Option<(Vec2, u32, f32)> = None;
+                for poly_idx in upstream::polygons_in_box(layer, min, max).expect("baked: the layer has bounds") {
+                    consider(layer_idx, layer, poly_idx, &mut layer_best);
+                }
+                let covers_layer = min.cmple(layer_min).all() && max.cmpge(layer_max).all();
+                // (`half` overflowing to infinity only happens for a non-finite `point`; the box then covers the layer)
+                if covers_layer || !half.is_finite() || layer_best.is_some_and(|(_, _, d)| d <= half * half) {
+                    if let Some((p, id, d)) = layer_best {
+                        // merge with the other layers' best by the same rule
+                        let better = match best {
+                            None => true,
+                            Some((_, best_id, best_d)) => d < best_d || (d == best_d && id > best_id),
+                        };
+                        if better {
+                            best = Some((p, id, d));
+                        }
+                    }
+                    break;
+                }
+                half *= 4.0;
             }
         }
-        closest
+        best.map(|(p, id, _)| (p, id, max_dist_sq))
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip_all))]
@@ -680,6 +723,39 @@ impl<'m> MeshAagu<'m> {
 
 
 
+
+/// A polygon's closest point to a query point and its squared distance ([`closest_edge_point_of_polygon`],
+/// [`closest_vertex_of_polygon`]).
+type InPolygon = fn(&Layer, &Polygon, Vec2) -> Option<(Vec2, f32)>;
+
+/// The closest point on the edges of `poly` to `point` and its squared distance; of equally close edges the last one.
+fn closest_edge_point_of_polygon(layer: &Layer, poly: &Polygon, point: Vec2) -> Option<(Vec2, f32)> {
+    let mut best: Option<(Vec2, f32)> = None;
+    let first = *poly.vertices.first()?;
+    for (a, b) in poly.vertices.iter().zip(poly.vertices.iter().skip(1).chain(iter::once(&first))) {
+        let p1 = layer.vertices[*a as usize].coords;
+        let p2 = layer.vertices[*b as usize].coords;
+        let on_segment = calc_projected_and_clipped_pos_on_line_segment(p1, p2, point, EPSILON);
+        let dist_sq = on_segment.distance_squared(point);
+        if best.is_none_or(|(_, d)| dist_sq <= d) {
+            best = Some((on_segment, dist_sq));
+        }
+    }
+    best
+}
+
+/// The closest vertex of `poly` to `point` and its squared distance; of equally close vertices the last one.
+fn closest_vertex_of_polygon(layer: &Layer, poly: &Polygon, point: Vec2) -> Option<(Vec2, f32)> {
+    let mut best: Option<(Vec2, f32)> = None;
+    for v in poly.vertices.iter() {
+        let p = layer.vertices[*v as usize].coords;
+        let dist_sq = p.distance_squared(point);
+        if best.is_none_or(|(_, d)| dist_sq <= d) {
+            best = Some((p, dist_sq));
+        }
+    }
+    best
+}
 
 /// Calculates the projection of the given point onto the given line.
 /// If the given point would be outside the given line segment, it is clipped to p1 or p2 - depending on which point is
@@ -772,6 +848,61 @@ mod tests {
         let mut mesh = tri.as_navmesh();
         mesh.bake();
         mesh
+    }
+
+    // ---- find_closest: the R-tree search gives the same results as the full scan ----
+
+    /// A mesh like the game's: obstacles in a jittered grid, simplified and merged polygons.
+    fn many_obstacles_mesh() -> Mesh {
+        let mut tri = Triangulation::from_outer_edges(&[vec2(0.0, 0.0), vec2(60.0, 0.0), vec2(60.0, 60.0), vec2(0.0, 60.0)]);
+        let mut seed = 3u64;
+        let mut rnd = || { seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); (seed >> 40) as f32 / (1u64 << 24) as f32 };
+        for i in 0..8 {
+            for j in 0..8 {
+                let c = vec2(4.0 + i as f32 * 7.0 + rnd() * 2.0, 4.0 + j as f32 * 7.0 + rnd() * 2.0);
+                let h = 0.5 + rnd();
+                tri.add_obstacle(vec![c + vec2(-h, -h), c + vec2(-h, h), c + vec2(h, h), c + vec2(h, -h)]);
+            }
+        }
+        tri.simplify(0.1);
+        let mut mesh = tri.as_navmesh();
+        mesh.merge_polygons();
+        mesh.bake();
+        mesh
+    }
+
+    #[test]
+    fn indexed_closest_point_search_equals_the_full_scan() {
+        let mesh = many_obstacles_mesh();
+        let aagu = MeshAagu { mesh: &mesh };
+        let mut seed = 11u64;
+        let mut rnd = || { seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); (seed >> 40) as f32 / (1u64 << 24) as f32 };
+        let modes: [InPolygon; 2] = [closest_edge_point_of_polygon, closest_vertex_of_polygon];
+        let mut compared = 0;
+        for _ in 0..400 {
+            // points all over and around the map, also exactly on grid lines (ties between polygons)
+            let p = vec2(rnd() * 70.0 - 5.0, rnd() * 70.0 - 5.0);
+            let p = if rnd() < 0.2 { p.round() } else { p };
+            for in_polygon in modes {
+                for max_dist in [0.5, 2.0, 7.0, f32::INFINITY] {
+                    for filter in [|_: usize| true, |i: usize| !i.is_multiple_of(3)] {
+                        let scan = aagu.find_closest(p, max_dist, filter, in_polygon, false);
+                        let indexed = aagu.find_closest(p, max_dist, filter, in_polygon, true);
+                        assert_eq!(scan, indexed, "point {p}, max_dist {max_dist}");
+                        compared += scan.is_some() as u32;
+                    }
+                }
+            }
+        }
+        assert!(compared > 1000, "most queries find something: {compared}");
+    }
+
+    #[test]
+    fn closest_point_search_without_baking_scans() {
+        let mut mesh = many_obstacles_mesh();
+        let expected = MeshAagu { mesh: &mesh }.find_closest_point_on_edge(vec2(30.3, 30.7), 3.0, |_| true);
+        mesh.unbake();
+        assert_eq!(MeshAagu { mesh: &mesh }.find_closest_point_on_edge(vec2(30.3, 30.7), 3.0, |_| true), expected);
     }
 
     // ---- calc_projected_and_clipped_pos_on_line_segment ----
@@ -923,14 +1054,14 @@ mod tests {
         assert_matches!(result.status.status, NavigationResultStatus::OutsideMesh);
     }
 
-    // ---- approx_path: PointCorrectionMode::ClosestPointInMesh ----
+    // ---- approx_path: PointCorrectionMode::ClosestMeshEdge ----
 
     #[test]
-    fn approx_path_start_outside_closest_point_corrects() {
+    fn approx_path_start_outside_closest_edge_corrects() {
         let mesh = simple_mesh();
         let aagu = MeshAagu { mesh: &mesh };
         let settings = NavigationRequestSettings {
-            start: PointCorrectionMode::ClosestPointInMesh(f32::INFINITY),
+            start: PointCorrectionMode::ClosestMeshEdge(f32::INFINITY),
             ..Default::default()
         };
         let result = aagu.approx_path(vec2(-1.0, 5.0), vec2(5.0, 5.0), settings);
@@ -939,11 +1070,11 @@ mod tests {
     }
 
     #[test]
-    fn approx_path_start_outside_closest_point_too_far() {
+    fn approx_path_start_outside_closest_edge_too_far() {
         let mesh = simple_mesh();
         let aagu = MeshAagu { mesh: &mesh };
         let settings = NavigationRequestSettings {
-            start: PointCorrectionMode::ClosestPointInMesh(0.5),
+            start: PointCorrectionMode::ClosestMeshEdge(0.5),
             ..Default::default()
         };
         let result = aagu.approx_path(vec2(-5.0, 5.0), vec2(5.0, 5.0), settings);
@@ -951,25 +1082,25 @@ mod tests {
     }
 
     #[test]
-    fn approx_path_closest_point_zero_dist_returns_none() {
+    fn approx_path_closest_edge_zero_dist_returns_none() {
         let mesh = simple_mesh();
         let aagu = MeshAagu { mesh: &mesh };
         let settings = NavigationRequestSettings {
-            start: PointCorrectionMode::ClosestPointInMesh(0.0),
+            start: PointCorrectionMode::ClosestMeshEdge(0.0),
             ..Default::default()
         };
         let result = aagu.approx_path(vec2(-1.0, 5.0), vec2(5.0, 5.0), settings);
         assert!(result.path.is_none());
     }
 
-    // ---- approx_path: PointCorrectionMode::ClosestMeshEdge ----
+    // ---- approx_path: PointCorrectionMode::ClosestMeshVertex ----
 
     #[test]
-    fn approx_path_end_outside_closest_edge_corrects() {
+    fn approx_path_end_outside_closest_vertex_corrects() {
         let mesh = simple_mesh();
         let aagu = MeshAagu { mesh: &mesh };
         let settings = NavigationRequestSettings {
-            end: PointCorrectionMode::ClosestMeshEdge(f32::INFINITY),
+            end: PointCorrectionMode::ClosestMeshVertex(f32::INFINITY),
             ..Default::default()
         };
         let result = aagu.approx_path(vec2(5.0, 5.0), vec2(12.0, 5.0), settings);
@@ -978,11 +1109,11 @@ mod tests {
     }
 
     #[test]
-    fn approx_path_closest_edge_zero_dist_returns_none() {
+    fn approx_path_closest_vertex_zero_dist_returns_none() {
         let mesh = simple_mesh();
         let aagu = MeshAagu { mesh: &mesh };
         let settings = NavigationRequestSettings {
-            end: PointCorrectionMode::ClosestMeshEdge(0.0),
+            end: PointCorrectionMode::ClosestMeshVertex(0.0),
             ..Default::default()
         };
         let result = aagu.approx_path(vec2(5.0, 5.0), vec2(12.0, 5.0), settings);
@@ -1038,7 +1169,7 @@ mod tests {
         let aagu = MeshAagu { mesh: &mesh };
         let settings = NavigationRequestSettings {
             islands: DifferentIslandMode::NoPath,
-            end: PointCorrectionMode::ClosestPointInMesh(f32::INFINITY),
+            end: PointCorrectionMode::ClosestMeshEdge(f32::INFINITY),
             ..Default::default()
         };
         // End point outside mesh, closest correction lands on right island
@@ -1102,7 +1233,7 @@ mod tests {
     #[test]
     fn default_modes() {
         let pcm = PointCorrectionMode::default();
-        assert_matches!(pcm, PointCorrectionMode::ClosestPointInMesh(_));
+        assert_matches!(pcm, PointCorrectionMode::ClosestMeshEdge(_));
         let dim = DifferentIslandMode::default();
         assert_matches!(dim, DifferentIslandMode::ClosestOnStartIsland);
     }
