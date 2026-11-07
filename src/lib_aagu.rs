@@ -198,17 +198,6 @@ pub struct NavigationRequestSettings {
     pub islands: DifferentIslandMode,
     /// The [`PointCorrectionMode`] of this navigation request's end point.
     pub end: PointCorrectionMode,
-    /// A placeholder, *not used right now*.
-    /// The radius that the agent has.
-    /// Whenever a path is created, it is checked if this radius fits in both directions on each polygon line it
-    /// intersects.
-    /// This might shift the waypoint of the agent on each polygon edge, to "make room" for the agent.
-    /// This should work as long as every polygon's edge is adjacent to the outside or an obstacle.
-    pub _agent_radius: f32,
-    /// A placeholder, *not used right now*.
-    /// The maximum allowed length that the agent is allowed to travel.
-    /// This can be used as an optimization to terminate some paths early on if they are to far away.
-    pub _max_length: f32,
 }
 impl Default for NavigationRequestSettings {
     fn default() -> Self {
@@ -216,8 +205,6 @@ impl Default for NavigationRequestSettings {
             start: PointCorrectionMode::ClosestMeshEdge(f32::INFINITY),
             islands: DifferentIslandMode::ClosestOnStartIsland,
             end: PointCorrectionMode::ClosestMeshEdge(f32::INFINITY),
-            _agent_radius: 0.0,
-            _max_length: 0.0,
         }
     }
 }
